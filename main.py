@@ -1,8 +1,12 @@
 import os
+import re
+import json
 import sqlite3
 import secrets
 import csv
 import io
+import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
@@ -15,6 +19,8 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM = os.environ.get("RESEND_FROM", "Angela Pelizer - CEBEC <contato@angelapelizer.com.br>")
 WHATSAPP_GROUP_URL_DEFAULT = os.environ.get("WHATSAPP_GROUP_URL", "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+MANYCHAT_API_KEY = os.environ.get("MANYCHAT_API_KEY", "")
+MANYCHAT_BUYER_TAG = os.environ.get("MANYCHAT_BUYER_TAG", "comprou-live")
 ACCEPTED_STATUSES = {"paid", "approved", "completed", "confirmed", "received"}
 
 resend.api_key = RESEND_API_KEY
@@ -199,6 +205,58 @@ def send_confirmation_email(nome: str, email: str):
         print(f"[email] falhou pra {email}: {exc}")
 
 
+def manychat_request(method: str, path: str, params: dict | None = None, body: dict | None = None) -> dict:
+    url = f"https://api.manychat.com{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {MANYCHAT_API_KEY}")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def normalize_phone_br(telefone: str) -> str:
+    digits = re.sub(r"\D", "", telefone or "")
+    if not digits:
+        return ""
+    if not digits.startswith("55") and len(digits) in (10, 11):
+        digits = "55" + digits
+    return "+" + digits
+
+
+def find_manychat_subscribers(field: str, value: str) -> list[int]:
+    result = manychat_request("GET", "/fb/subscriber/findBySystemField", params={field: value})
+    data = result.get("data") or []
+    if isinstance(data, dict):
+        data = [data]
+    return [int(s["id"]) for s in data if s.get("id")]
+
+
+def tag_manychat_buyer(email: str, telefone: str):
+    if not MANYCHAT_API_KEY:
+        print("[manychat] skip — MANYCHAT_API_KEY ausente")
+        return
+    try:
+        ids = find_manychat_subscribers("email", email) if email else []
+        phone = normalize_phone_br(telefone)
+        if not ids and phone:
+            ids = find_manychat_subscribers("phone", phone)
+        if not ids:
+            print(f"[manychat] comprador sem assinante no ManyChat (email={email!r})")
+            return
+        for sid in ids:
+            manychat_request(
+                "POST",
+                "/fb/subscriber/addTagByName",
+                body={"subscriber_id": sid, "tag_name": MANYCHAT_BUYER_TAG},
+            )
+            print(f"[manychat] tag {MANYCHAT_BUYER_TAG} aplicada em {sid}")
+    except Exception as exc:
+        print(f"[manychat] falhou (email={email!r}): {exc}")
+
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -249,6 +307,7 @@ async def webhook_zpay(request: Request, background_tasks: BackgroundTasks):
         )
 
     background_tasks.add_task(send_confirmation_email, lead["nome"], lead["email"])
+    background_tasks.add_task(tag_manychat_buyer, lead["email"], lead["telefone"])
 
     return JSONResponse({"status": "ok"}, status_code=200)
 
