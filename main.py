@@ -165,7 +165,7 @@ def send_confirmation_email(nome: str, email: str):
           com Angela Pelizer.
         </p>
         <p style="font-size:15px; line-height:1.6;">
-          📅 <strong>Segunda-feira, às 20h00</strong> — acesso exclusivo pra quem garantiu ingresso.
+          📅 <strong>Segunda-feira, às 19h00</strong> — acesso exclusivo pra quem garantiu ingresso.
         </p>
         <div style="margin: 28px 0;">
           <a href="{redirect_url}"
@@ -182,7 +182,7 @@ def send_confirmation_email(nome: str, email: str):
           </a>
         </div>
         <p style="font-size:14px; line-height:1.6; color:#333;">
-          Guarde este e-mail: o link da live é o mesmo na segunda às 20h.
+          Guarde este e-mail: o link da live é o mesmo na segunda às 19h.
         </p>
         <p style="font-size:13px; color:#888; margin-top:32px;">
           Qualquer dúvida, é só responder este e-mail.
