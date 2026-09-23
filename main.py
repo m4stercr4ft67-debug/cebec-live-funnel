@@ -17,6 +17,7 @@ from fastapi.responses import RedirectResponse, JSONResponse, PlainTextResponse
 DB_PATH = os.environ.get("DB_PATH", "/app/data/cebec_compradores.db")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM = os.environ.get("RESEND_FROM", "Angela Pelizer - CEBEC <contato@angelapelizer.com.br>")
+LIVE_URL = os.environ.get("LIVE_URL", "https://angelapelizer.com.br/live")
 WHATSAPP_GROUP_URL_DEFAULT = os.environ.get("WHATSAPP_GROUP_URL", "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 MANYCHAT_API_KEY = os.environ.get("MANYCHAT_API_KEY", "")
@@ -166,23 +167,22 @@ def send_confirmation_email(nome: str, email: str):
         <p style="font-size:15px; line-height:1.6;">
           📅 <strong>Segunda-feira, às 20h00</strong> — acesso exclusivo pra quem garantiu ingresso.
         </p>
-        <div style="text-align:center; margin: 28px 0;">
+        <div style="margin: 28px 0;">
           <a href="{redirect_url}"
              style="background:#3D7A45; color:#F5F4F0; text-decoration:none; padding:16px 32px;
-                    border-radius:4px; font-weight:700; letter-spacing:0.04em; display:inline-block;">
-            Entrar no Grupo do WhatsApp
+                    border-radius:4px; font-weight:700; letter-spacing:0.04em; display:block;
+                    text-align:center; margin-bottom:12px;">
+            Entrar na comunidade
+          </a>
+          <a href="{LIVE_URL}"
+             style="background:transparent; color:#3D7A45; text-decoration:none; padding:15px 31px;
+                    border:1px solid #3D7A45; border-radius:4px; font-weight:700;
+                    letter-spacing:0.04em; display:block; text-align:center;">
+            Acessar a live
           </a>
         </div>
         <p style="font-size:14px; line-height:1.6; color:#333;">
-          É no grupo que a gente avisa o link de acesso à sala no dia, manda lembretes e tira dúvidas
-          antes da live. Entra assim que puder pra não perder nada.
-        </p>
-        <p style="font-size:14px; line-height:1.6; color:#333;">
-          A gravação e os materiais complementares ficam disponíveis depois, na área de membros —
-          o link de acesso é enviado por lá mesmo, no grupo.
-        </p>
-        <p style="font-size:14px; line-height:1.6; color:#333;">
-          🗓️ Já adianta colocar na agenda: <strong>segunda-feira, 20h</strong>.
+          Guarde este e-mail: o link da live é o mesmo na segunda às 20h.
         </p>
         <p style="font-size:13px; color:#888; margin-top:32px;">
           Qualquer dúvida, é só responder este e-mail.
@@ -196,7 +196,7 @@ def send_confirmation_email(nome: str, email: str):
             {
                 "from": RESEND_FROM,
                 "to": [email],
-                "subject": "[Confirmado] Sua vaga na Live Fechada de Segunda-feira - CEBEC",
+                "subject": "[Confirmado] Sua vaga na Live Fechada de Segunda - links de acesso",
                 "html": html,
             }
         )
