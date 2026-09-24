@@ -17,10 +17,11 @@ from zoneinfo import ZoneInfo
 
 import resend
 from fastapi import FastAPI, Request, BackgroundTasks, Header, HTTPException, Query
-from fastapi.responses import RedirectResponse, JSONResponse, PlainTextResponse, HTMLResponse
+from fastapi.responses import Response, RedirectResponse, JSONResponse, PlainTextResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from emails_abandono import SEQUENCIA
+import email_layout
 
 DB_PATH = os.environ.get("DB_PATH", "/app/data/cebec_compradores.db")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
@@ -93,6 +94,12 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'pending', sent_at TEXT,
                 resend_id TEXT, error TEXT, UNIQUE(lead_id, step),
                 FOREIGN KEY(lead_id) REFERENCES leads(id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_opens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, lead_id INTEGER,
+                step INTEGER, opened_at TEXT NOT NULL
             )
         """)
         conn.execute("""
@@ -431,11 +438,15 @@ def render_abandonment_email(lead: sqlite3.Row, step: int, remaining: int) -> tu
     preheader = template["preheader"].format(**html_values)
     paragraphs = [p.format(**html_values) for p in template["paragraphs"]]
     after = [p.format(**html_values) for p in template["after_cta"]]
-    blocks = "".join(f'<div style="font-size:15px;line-height:1.6;margin:0 0 16px">{p}</div>' for p in paragraphs)
-    after_html = "".join(f'<div style="font-size:14px;line-height:1.6;margin:0 0 10px">{p}</div>' for p in after)
-    body = f'''<div style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:560px;margin:0 auto;color:#0B1929"><span style="display:none!important;visibility:hidden;opacity:0;height:0;width:0">{preheader}</span><div style="background:#0B1929;padding:28px 32px;text-align:center"><span style="color:#F5F4F0;font-size:13px;letter-spacing:.18em;text-transform:uppercase">CEBEC · Angela Pelizer</span></div><div style="padding:32px;background:#F5F4F0">{blocks}<div style="margin:28px 0"><a href="{checkout}" style="background:#3D7A45;color:#F5F4F0;text-decoration:none;padding:16px 32px;border-radius:4px;font-weight:700;display:block;text-align:center">{template['cta']}</a></div>{after_html}<p style="font-size:11px;color:#777;margin-top:32px">Não quer mais receber estes e-mails? <a href="{unsub}">Descadastre-se</a>.</p></div></div>'''
-    plain_parts = [re.sub(r"<[^>]+>", "", p).replace("&nbsp;", " ") for p in paragraphs + after]
-    text_version = html_lib.unescape("\n\n".join(plain_parts) + f"\n\n{template['cta']}: {checkout}\n\nDescadastrar: {unsub}")
+    pixel = f"https://live.angelapelizer.com/cebec/o.gif?l={lead['id']}&e={step}"
+    body = email_layout.render(
+        step=step, preheader=preheader, paragraphs=paragraphs, cta_label=template["cta"],
+        cta_url=checkout, after_cta=after, data_live=data_live, unsubscribe_url=unsub,
+        open_pixel_url=pixel,
+    )
+    plain_parts = [re.sub(r"<[^>]+>", " ", p).replace("&nbsp;", " ") for p in paragraphs + after]
+    plain_parts = [re.sub(r"[ \t]+", " ", x).strip() for x in plain_parts]
+    text_version = html_lib.unescape("\n\n".join(plain_parts) + f"\n\n{template['cta']}: {checkout}\n\nAngela Pelizer\nFundadora do CEBEC\n\nDescadastrar: {unsub}")
     return subject, body, text_version, unsub
 
 
@@ -542,6 +553,22 @@ async def webhook_lead(request: Request, authorization: str | None = Header(defa
     return {"status": "ok", "live_at": live_iso, "scheduled": scheduled}
 
 
+PIXEL_GIF = bytes.fromhex("47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b")
+
+
+@app.get("/cebec/o.gif")
+def email_open(l: int | None = None, e: int | None = None):
+    """Pixel de abertura: registra (lead, passo) e devolve GIF 1x1 transparente."""
+    if l is not None:
+        try:
+            with db() as conn:
+                if conn.execute("SELECT 1 FROM leads WHERE id=?", (l,)).fetchone():
+                    conn.execute("INSERT INTO email_opens (lead_id,step,opened_at) VALUES (?,?,?)", (l, e, iso_utc(now_utc())))
+        except Exception as exc:
+            print(f"[pixel] erro: {exc}")
+    return Response(PIXEL_GIF, media_type="image/gif", headers={"Cache-Control": "no-store, max-age=0"})
+
+
 def checkout_is_open(now: datetime) -> bool:
     local = now.astimezone(BRT)
     if local.weekday() == 0 and (local.hour, local.minute) >= (18, 30):
@@ -618,6 +645,7 @@ def abandonment_admin(authorization: str | None = Header(default=None)):
             SUM(CASE WHEN q.status='sent' THEN 1 ELSE 0 END) enviados,
             SUM(CASE WHEN q.status='skipped' THEN 1 ELSE 0 END) pulados,
             SUM(CASE WHEN q.status='failed' THEN 1 ELSE 0 END) falhas,
+            (SELECT COUNT(DISTINCT o.lead_id) FROM email_opens o WHERE o.step=q.step) aberturas,
             (SELECT COUNT(*) FROM email_clicks c WHERE c.step=q.step) cliques
             FROM email_queue q GROUP BY q.step ORDER BY q.step""").fetchall()
         lead_count = conn.execute("SELECT COUNT(*) n FROM leads").fetchone()["n"]
@@ -625,7 +653,7 @@ def abandonment_admin(authorization: str | None = Header(default=None)):
         for lead in conn.execute("SELECT * FROM leads").fetchall():
             if lead_has_bought(conn, lead["email"], lead["telefone"], datetime.fromisoformat(lead["live_at"])):
                 converted += 1
-    by_step = {f"e{r['step']}": {k: (r[k] or 0) for k in ("agendados", "enviados", "pulados", "falhas", "cliques")} for r in rows}
+    by_step = {f"e{r['step']}": {k: (r[k] or 0) for k in ("agendados", "enviados", "pulados", "falhas", "aberturas", "cliques")} for r in rows}
     return {"leads": lead_count, "compradores": converted, "por_passo": by_step}
 
 

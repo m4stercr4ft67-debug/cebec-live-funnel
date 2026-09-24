@@ -13,21 +13,23 @@ Regra de conteúdo: nenhum número inventado. Depoimentos são reais (alunas CEB
 só primeiro nome). Escassez: 40 vagas por semana (real, confirmado pelo cliente).
 """
 
-DEPOIMENTO_DIVISOR = (
-    "“O CEBEC está sendo um divisor na minha carreira. Obrigada, Angela, por nos "
-    "proporcionar tanto conhecimento.” — aluna CEBEC"
+from email_layout import quote_block
+
+DEPOIMENTO_DIVISOR = quote_block(
+    "O CEBEC está sendo um divisor na minha carreira. Obrigada, Angela, por nos proporcionar tanto conhecimento.",
+    "Aluna CEBEC",
 )
-DEPOIMENTO_PATTY = (
-    "“Além de nos capacitar, seu movimento nos possibilita nos conectarmos com "
-    "pessoas incríveis, que vivem o mesmo propósito que a gente.” — Patty C., aluna CEBEC"
+DEPOIMENTO_PATTY = quote_block(
+    "Além de nos capacitar, seu movimento nos possibilita nos conectarmos com pessoas incríveis, que vivem o mesmo propósito que a gente.",
+    "Patty C. · aluna CEBEC",
 )
-DEPOIMENTO_VANESSA = (
-    "“Olha que eu já fiz muitas formações, mas o CEBEC está sendo construído com "
-    "muito propósito.” — Vanessa N., aluna CEBEC"
+DEPOIMENTO_VANESSA = quote_block(
+    "Olha que eu já fiz muitas formações, mas o CEBEC está sendo construído com muito propósito.",
+    "Vanessa N. · aluna CEBEC",
 )
-DEPOIMENTO_ELIZIA = (
-    "“Noite de muito aprendizado. Foi um encontro memorável. Gratidão por nos "
-    "proporcionar horas de reflexões e muito conhecimento.” — Elizia S., participante"
+DEPOIMENTO_ELIZIA = quote_block(
+    "Noite de muito aprendizado. Foi um encontro memorável. Gratidão por nos proporcionar horas de reflexões e muito conhecimento.",
+    "Elizia S. · participante",
 )
 
 
@@ -45,7 +47,7 @@ SEQUENCIA = [
         "cta": "Concluir minha inscrição",
         "after_cta": [
             "Nos vemos na {data_live}, às 19h.",
-            "Com carinho,<br>Angela Pelizer",
+            "Com carinho,",
         ],
     },
     {
@@ -68,7 +70,6 @@ SEQUENCIA = [
         "cta": "Quero estar na live",
         "after_cta": [
             "São apenas 40 vagas por semana. Hoje restam {vagas_restantes}.",
-            "Angela",
         ],
     },
     {
@@ -81,15 +82,13 @@ SEQUENCIA = [
             "Quem cuida de pessoas costuma adiar o próprio desenvolvimento. Sempre há uma urgência maior, uma demanda de outra pessoa, um “depois eu vejo isso”.",
             "Talvez você esteja pensando que não tem tempo agora, ou que já conhece esses temas. Eu entendo. Mas conhecer não é o mesmo que saber aplicar diante de um conflito real, com a diretoria cobrando resultado e a equipe em silêncio.",
             "Veja o que me escreveram algumas pessoas que decidiram dar esse passo:",
-            "<div style='border-left:3px solid #3D7A45;padding:4px 0 4px 16px;margin:0 0 12px;font-style:italic'>" + DEPOIMENTO_DIVISOR + "</div>"
-            "<div style='border-left:3px solid #3D7A45;padding:4px 0 4px 16px;margin:0 0 12px;font-style:italic'>" + DEPOIMENTO_VANESSA + "</div>"
-            "<div style='border-left:3px solid #3D7A45;padding:4px 0 4px 16px;margin:0 0 16px;font-style:italic'>" + DEPOIMENTO_PATTY + "</div>",
+            DEPOIMENTO_DIVISOR + DEPOIMENTO_VANESSA + DEPOIMENTO_PATTY,
             "Amanhã, às 19h, eu estarei lá. Gostaria muito que você também estivesse.",
         ],
         "cta": "Garantir minha vaga",
         "after_cta": [
             "Restam {vagas_restantes} das 40 vagas desta semana.",
-            "Com afeto,<br>Angela Pelizer",
+            "Com afeto,",
         ],
     },
     {
@@ -100,13 +99,12 @@ SEQUENCIA = [
             "{primeiro_nome},",
             "Hoje, às 19h, abrimos a sala da live <strong>Gestão de Impacto na Prática</strong>.",
             "Estou preparando cada detalhe para que você saia com ferramentas concretas, e não apenas com anotações bonitas.",
-            "<div style='border-left:3px solid #3D7A45;padding:4px 0 4px 16px;margin:0 0 16px;font-style:italic'>" + DEPOIMENTO_ELIZIA + "</div>",
+            DEPOIMENTO_ELIZIA,
             "Você recebe acesso ao vivo e à gravação por 30 dias. Se algum imprevisto acontecer no horário, o conteúdo continua com você.",
         ],
         "cta": "Garantir minha vaga para hoje",
         "after_cta": [
             "Restam {vagas_restantes} vagas. As inscrições encerram às 18h30.",
-            "Angela",
         ],
     },
     {
@@ -123,7 +121,7 @@ SEQUENCIA = [
         "cta": "Garantir minha vaga por R$19,90",
         "after_cta": [
             "Depois das 18h30 este link deixa de funcionar e as inscrições se encerram.",
-            "Espero ver você lá dentro.<br>Angela Pelizer",
+            "Espero ver você lá dentro.",
         ],
     },
 ]
