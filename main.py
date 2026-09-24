@@ -461,7 +461,9 @@ async def process_email(queue_id: int):
             skip_remaining(conn, row["id"])
             return
         total = int(os.environ.get("VAGAS_SEMANA", "40"))
-        remaining = max(0, total - get_week_sales(conn, live))
+        remaining = fixed_remaining()
+        if remaining is None:
+            remaining = max(0, total - get_week_sales(conn, live))
         subject, html, text_version, unsub = render_abandonment_email(row, row["step"], remaining)
     payload = {"from": RESEND_FROM, "to": [row["email"]], "subject": subject, "html": html, "text": text_version, "headers": {"List-Unsubscribe": f"<{unsub}>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"}, "tags": [{"name": "seq", "value": "abandono"}, {"name": "step", "value": f"e{row['step']}"}]}
     last_error = None
@@ -567,10 +569,19 @@ def checkout(o: str = Query(default="std"), e: int | None = Query(default=None),
     return RedirectResponse(url, status_code=302)
 
 
+def fixed_remaining() -> int | None:
+    """Vagas restantes definidas manualmente (env VAGAS_RESTANTES_FIXO); None = calcular pelas vendas."""
+    value = os.environ.get("VAGAS_RESTANTES_FIXO", "").strip()
+    return max(0, int(value)) if value.isdigit() else None
+
+
 @app.get("/public/cebec/vagas")
 def public_vagas():
     live, closing = target_live()
     total = max(0, int(os.environ.get("VAGAS_SEMANA", "40")))
+    fixed = fixed_remaining()
+    if fixed is not None:
+        return JSONResponse({"total": total, "vendidas": max(0, total - fixed), "restantes": fixed, "fixo": True, "live_at": iso_utc(live), "fechamento": iso_utc(closing), "recentes": []}, headers={"Cache-Control": "public, max-age=30"})
     with db() as conn:
         sold, recent = get_week_sales(conn, live, include_recent=True)
     return JSONResponse({"total": total, "vendidas": sold, "restantes": max(0, total - sold), "live_at": iso_utc(live), "fechamento": iso_utc(closing), "recentes": recent}, headers={"Cache-Control": "public, max-age=30"})
