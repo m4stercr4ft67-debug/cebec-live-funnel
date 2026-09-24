@@ -1,0 +1,4 @@
+__pycache__/
+.pytest_cache/
+ADMIN_TOKEN.txt
+.codex-spec-*.md
