@@ -20,6 +20,45 @@ log = logging.getLogger(__name__)
 CARGOS = {'rh': 'RH', 'gestor': 'Gestor(a)/líder', 'dono': 'Dono(a)', 'consultor': 'Consultor/psicólogo', 'outro': 'Outro'}
 PORTES = {'ate50': 'Até 50', '50a200': '50 a 200', '200mais': 'Mais de 200'}
 EMPTY = {'version': 'v2', 'content': {'messages': []}}
+QUESTIONS = [
+    "Hora extra e 'tudo é urgente' viraram rotina na equipe?",
+    'Tem gente que não sabe com clareza o que se espera dela ou quem decide o quê?',
+    'O esforço das pessoas só é notado quando algo dá errado?',
+    "Existem conflitos, ironias ou 'brincadeiras' que todo mundo vê e ninguém conversa?",
+    'Em reunião, quase ninguém discorda ou traz um problema antes de virar crise?',
+]
+ANSWERS = {'0': 'Não', '1': 'Às vezes', '2': 'Sim, frequente'}
+PLAN = ('Seu plano de 30 dias, um passo por semana:\n'
+        '1. Escolha a pergunta que mais pesou e anote 3 situações reais.\n'
+        '2. Converse com duas pessoas, sem julgamento.\n'
+        '3. Teste uma mudança pequena por 7 dias.\n'
+        '4. Revise o que mudou e ajuste.')
+
+
+def excluded(body):
+    usernames = {x.strip().lstrip('@').casefold() for x in os.environ.get(
+        'DM_EXCLUDE_IG', 'roger.arruda_,jaopelizer').split(',') if x.strip()}
+    return ('nao-responder-bot' in {x.strip() for x in body.tags.split(',')}
+            or body.ig_username.strip().lstrip('@').casefold() in usernames)
+
+
+def band(score):
+    return 'verde' if score <= 3 else 'amarelo' if score <= 6 else 'vermelho'
+
+
+def result_text(score):
+    descriptions = {
+        'verde': '🟢 Atenção pontual\n\nBom ponto de partida. Converse com a equipe sobre o que pontuou antes que vire padrão.',
+        'amarelo': '🟡 Sinal amarelo\n\nOs sinais já fazem parte da rotina. Vale escolher um deles e agir ainda este mês.',
+        'vermelho': '🔴 Sinal vermelho\n\nO ambiente está desgastando as pessoas. É hora de levar o tema à liderança e ao RH.',
+    }
+    return f'Seu resultado: {score} de 10 ' + descriptions[band(score)]
+
+
+def question(sid, number, prefix=None, actions=None):
+    messages = ([{'type': 'text', 'text': prefix}] if prefix else [])
+    messages.append({'type': 'text', 'text': f'Pergunta {number} de 5\n\n{QUESTIONS[number - 1]}'})
+    return block('', actions, replies(sid, f'q{number}', ANSWERS), messages)
 
 
 def core():
@@ -48,6 +87,12 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS dm_jobs_due ON dm_jobs(status, send_at);
         ''')
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(dm_leads)')}
+        for name in ['q1', 'q2', 'q3', 'q4', 'q5', 'score']:
+            if name not in columns:
+                conn.execute(f'ALTER TABLE dm_leads ADD COLUMN {name} INTEGER')
+        if 'unsubscribed_at' not in columns:
+            conn.execute('ALTER TABLE dm_leads ADD COLUMN unsubscribed_at TEXT')
 
 
 class Incoming(BaseModel):
@@ -103,7 +148,7 @@ def accepted(conn, sid, now):
 def mapa(body: Incoming, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
     authorize(authorization)
     incoming_tags = {x.strip() for x in body.tags.split(',')}
-    if 'nao-responder-bot' in incoming_tags:
+    if excluded(body):
         return EMPTY
     sid, now = body.subscriber_id, core().now_utc()
     text = body.text.strip()
@@ -122,7 +167,7 @@ def mapa(body: Incoming, background_tasks: BackgroundTasks, authorization: str |
             background_tasks.add_task(worker_once)
             return block('Obrigada! A equipe do CEBEC vai te chamar por aqui.', tags('qualificado-b2b', 'b2b-aceitou-contato'))
         if not lead or text.upper() == 'MAPA':
-            conn.execute("UPDATE dm_leads SET state='awaiting_email',email_attempts=0 WHERE subscriber_id=?", (sid,))
+            conn.execute("UPDATE dm_leads SET state='awaiting_email',email_attempts=0,q1=NULL,q2=NULL,q3=NULL,q4=NULL,q5=NULL,score=NULL WHERE subscriber_id=?", (sid,))
             return block('Oi! Aqui é da equipe da Dra. Angela 👋 Te mando agora as 5 perguntas pra descobrir se sua equipe está adoecendo. Qual seu melhor e-mail?\n\nUsamos seu e-mail só para enviar conteúdos do CEBEC. Você pode sair quando quiser.', tags('lead-mapa'))
         if lead['state'] != 'awaiting_email':
             return EMPTY
@@ -132,20 +177,21 @@ def mapa(body: Incoming, background_tasks: BackgroundTasks, authorization: str |
         if not valid and attempts < 3:
             conn.execute('UPDATE dm_leads SET email_attempts=? WHERE subscriber_id=?', (attempts, sid))
             return block('Hmm, acho que faltou algo no e-mail. Pode digitar de novo?')
-        conn.execute("UPDATE dm_leads SET state='awaiting_cargo',email=?,email_attempts=? WHERE subscriber_id=?",
+        conn.execute("UPDATE dm_leads SET state='q1',email=?,email_attempts=? WHERE subscriber_id=?",
                      (email if valid else None, attempts, sid))
     # Explicit opt-in: only emit the custom field action when it has been configured.
     actions = [field('email_mapa', email)] if valid and os.environ.get('MANYCHAT_EMAIL_MAPA_FIELD_EXISTS') == '1' else []
-    return block('Perfeito! Qual é o seu papel hoje?', actions, replies(sid, 'cargo', CARGOS))
+    return question(sid, 1, 'Anotado! Agora responde rapidinho, pensando nas últimas semanas (não num dia ruim). São 5 perguntas 👇', actions)
 
 
 @router.post('/dm/mapa/cb')
 def callback(body: Incoming, step: str, v: str, background_tasks: BackgroundTasks,
              authorization: str | None = Header(default=None)):
     authorize(authorization)
-    if 'nao-responder-bot' in {x.strip() for x in body.tags.split(',')}:
+    if excluded(body):
         return EMPTY
     choices = {'cargo': CARGOS, 'porte': PORTES, 'b2b': {'sim': 'Sim', 'nao': 'Agora não'}}
+    choices.update({f'q{i}': ANSWERS for i in range(1, 6)})
     if step not in choices or v not in choices[step]:
         raise HTTPException(400, 'Callback inválido')
     sid, now = body.subscriber_id, core().now_utc()
@@ -154,6 +200,28 @@ def callback(body: Incoming, step: str, v: str, background_tasks: BackgroundTask
         lead = conn.execute('SELECT * FROM dm_leads WHERE subscriber_id=?', (sid,)).fetchone()
         if not lead:
             return EMPTY
+        if step in {f'q{i}' for i in range(1, 6)}:
+            if lead['state'] != step and lead[step] is None:
+                return EMPTY
+            conn.execute(f'UPDATE dm_leads SET {step}=?,updated_at=?,last_user_at=? WHERE subscriber_id=?',
+                         (int(v), now.isoformat(), now.isoformat(), sid))
+            score = sum(int(v) if key == step else (lead[key] or 0) for key in choices if key.startswith('q'))
+            conn.execute('UPDATE dm_leads SET score=? WHERE subscriber_id=?', (score, sid))
+            if lead['state'] != step:
+                return block('', [field('score_mapa', score)], messages=[{'type': 'text', 'text': 'Resposta atualizada.'}])
+            number = int(step[1])
+            if number < 5:
+                conn.execute('UPDATE dm_leads SET state=? WHERE subscriber_id=?', (f'q{number + 1}', sid))
+                return question(sid, number + 1)
+            conn.execute("UPDATE dm_leads SET state='awaiting_cargo' WHERE subscriber_id=?", (sid,))
+            enqueue(conn, sid, 'd0', now)
+            background_tasks.add_task(worker_once)
+            plan = PLAN + ('\n\nTe mandei tudo por e-mail também, com o material completo em PDF.' if lead['email'] else '')
+            return block('', [field('score_mapa', score)] + tags('mapa-' + band(score)),
+                         replies(sid, 'cargo', CARGOS), [
+                             {'type': 'text', 'text': result_text(score)},
+                             {'type': 'text', 'text': plan},
+                             {'type': 'text', 'text': 'Pra eu te indicar o próximo passo certo: qual é o seu papel hoje?'}])
         if step == 'b2b':
             if lead['state'] != 'delivered' or not lead['b2b'] or lead['contact_accepted']:
                 return EMPTY
@@ -171,15 +239,12 @@ def callback(body: Incoming, step: str, v: str, background_tasks: BackgroundTask
             return block('Combinado! Alguém da equipe do CEBEC vai te chamar por aqui em breve.', tags('b2b-aceitou-contato'))
         b2b = lead['cargo'] in {'rh', 'dono'} and v in {'50a200', '200mais'}
         conn.execute("UPDATE dm_leads SET porte=?,b2b=?,state='delivered' WHERE subscriber_id=?", (v, b2b, sid))
-        for kind, delay in [('d0', timedelta()), ('zrm', timedelta()), ('offer', timedelta(minutes=2)), ('reminder', timedelta(hours=22))]:
+        for kind, delay in [('zrm', timedelta()), ('offer', timedelta(minutes=2)), ('reminder', timedelta(hours=22))]:
             enqueue(conn, sid, kind, now + delay)
         if b2b:
             enqueue(conn, sid, 'alert_qualified', now)
     background_tasks.add_task(worker_once)
-    message = 'Aqui estão suas 5 perguntas 📄'
-    if lead['email']:
-        message += ' Também mandei uma cópia no seu e-mail.'
-    messages = [{'type': 'text', 'text': message, 'buttons': [{'type': 'url', 'caption': 'Abrir as 5 perguntas', 'url': os.environ.get('PDF_URL', '')}]}]
+    messages = [{'type': 'text', 'text': 'Obrigada! 🙏'}]
     if b2b:
         messages.append({'type': 'text', 'text': 'Vi que você cuida de uma empresa com bastante gente. Faz sentido a equipe do CEBEC te chamar aqui pra entender como vocês estão com a saúde da equipe?'})
     return block('', [field('porte', v)] + (tags('qualificado-b2b') if b2b else []),
@@ -202,24 +267,33 @@ def send_job(kind, lead):
         response = httpx.post(url, headers={'Authorization': f'Bearer {secret}'}, json=payload, timeout=15)
         response.raise_for_status()
         return
-    if kind in {'offer', 'reminder'}:
+    if kind in {'offer', 'reminder', 'quiz_reminder'}:
         if not app.MANYCHAT_API_KEY:
             raise RuntimeError('MANYCHAT_API_KEY ausente')
-        content = 'lembrete-dm' if kind == 'reminder' else 'oferta-dm'
+        score = lead['score'] or 0
+        content = 'lembrete-dm' if kind == 'reminder' else 'oferta-dm-' + band(score)
         url = base_url() + '/dm/r?' + urlencode({'s': lead['subscriber_id'], 'to': 'ebook', 'utm_content': content})
         text = ("Conseguiu responder as 5 perguntas? Se 3 ou mais deram 'sim', o ebook é o próximo passo mais rápido: R$ 9,90 👇" if kind == 'reminder' else
-                'As perguntas mostram o que observar. O ebook Liderança de Impacto mostra como agir com a equipe: 7 práticas com exercícios pra aplicar na mesma semana. R$ 9,90 👇')
+                (f'Com {score} de 10, o próximo passo é transformar isso em prática com a equipe. O ebook Liderança de Impacto traz 7 práticas com exercícios pra aplicar já nesta semana. R$ 9,90 👇' if score >= 4 else
+                 'Pra manter a equipe nesse nível, o ebook Liderança de Impacto traz 7 práticas com exercícios pra aplicar no dia a dia. R$ 9,90 👇'))
         data = block('', messages=[{'type': 'text', 'text': text, 'buttons': [{'type': 'url', 'caption': 'Quero o ebook', 'url': url}]}])
+        if kind == 'quiz_reminder':
+            number = int(lead['state'][1])
+            data = question(lead['subscriber_id'], number, f'Faltam só {6 - number} perguntas pro seu resultado 👇')
         result = app.manychat_request('POST', '/fb/sending/sendContent', body={'subscriber_id': lead['subscriber_id'], 'data': data})
         if result.get('status') != 'success':
             raise RuntimeError('ManyChat recusou envio')
         return
     if kind == 'd0':
-        if not lead['email']:
+        if not lead['email'] or lead['unsubscribed_at']:
             return
         recipients = [lead['email']]
-        subject = 'Suas 5 perguntas para cuidar da equipe'
-        body = f"<p>Olá, {html.escape(lead['nome'] or '')}!</p><p><a href=\"{html.escape(os.environ.get('PDF_URL', ''), quote=True)}\">Abrir as 5 perguntas</a></p>"
+        subject = f"Seu resultado: {lead['score']} de 10 + as 5 perguntas em PDF"
+        unsub = base_url() + '/dm/descadastrar?' + urlencode({'s': lead['subscriber_id'], 't': app.unsubscribe_token('dm:' + lead['subscriber_id'])})
+        body = (f"<p>Olá, {html.escape(lead['nome'] or '')}!</p><p>" + result_text(lead['score']).replace('\n', '<br>') + '</p><p>' + PLAN.replace('\n', '<br>') + '</p>'
+                + app.email_layout._button(html.escape(os.environ.get('PDF_URL', ''), quote=True), 'Baixar as 5 perguntas (PDF)')
+                + app.email_layout._button(html.escape(base_url() + '/dm/r?' + urlencode({'s': lead['subscriber_id'], 'utm_content': 'oferta-dm-' + band(lead['score'])}), quote=True), 'Quero o ebook')
+                + f'<p>Você está recebendo este e-mail porque respondeu ao MAPA do CEBEC.<br><a href="{html.escape(unsub, quote=True)}">Não quero mais receber estes e-mails</a></p>')
     else:
         recipients = [x.strip() for x in os.environ.get('B2B_ALERT_EMAILS', '').split(',') if x.strip()]
         if not recipients:
@@ -234,6 +308,9 @@ def send_job(kind, lead):
 async def worker_once(now=None):
     now = now or core().now_utc()
     with core().db() as conn:
+        for lead in conn.execute("SELECT * FROM dm_leads WHERE state IN ('q1','q2','q3','q4','q5') AND reminder_sent_at IS NULL"):
+            if now - datetime.fromisoformat(lead['last_user_at']) >= timedelta(hours=3):
+                enqueue(conn, lead['subscriber_id'], 'quiz_reminder', now)
         ids = [r['id'] for r in conn.execute("SELECT id FROM dm_jobs WHERE status='pending' AND send_at<=? ORDER BY send_at,id", (now.isoformat(),))]
     for job_id in ids:
         with core().db() as conn:
@@ -243,6 +320,9 @@ async def worker_once(now=None):
             job = conn.execute('SELECT * FROM dm_jobs WHERE id=?', (job_id,)).fetchone()
             lead = conn.execute('SELECT * FROM dm_leads WHERE subscriber_id=?', (job['subscriber_id'],)).fetchone()
             skip = not lead
+            if lead and job['kind'] == 'quiz_reminder':
+                elapsed = now - datetime.fromisoformat(lead['last_user_at'])
+                skip = lead['state'] not in {'q1','q2','q3','q4','q5'} or bool(lead['reminder_sent_at']) or not timedelta(hours=3) <= elapsed < timedelta(hours=23)
             if lead and job['kind'] in {'offer', 'reminder'}:
                 skip = now - datetime.fromisoformat(lead['last_user_at']) >= timedelta(hours=23, minutes=50)
                 if job['kind'] == 'reminder':
@@ -259,7 +339,7 @@ async def worker_once(now=None):
             status = 'failed'
         with core().db() as conn:
             conn.execute('UPDATE dm_jobs SET status=? WHERE id=?', (status, job_id))
-            if status == 'sent' and job['kind'] == 'reminder':
+            if status == 'sent' and job['kind'] in {'reminder', 'quiz_reminder'}:
                 conn.execute('UPDATE dm_leads SET reminder_sent_at=? WHERE subscriber_id=?', (now.isoformat(), lead['subscriber_id']))
 
 
@@ -291,7 +371,7 @@ async def shutdown():
 
 @router.get('/dm/r')
 def redirect(s: str, to: str = 'ebook', utm_content: str = 'oferta-dm'):
-    if to != 'ebook' or utm_content not in {'oferta-dm', 'lembrete-dm'}:
+    if to != 'ebook' or utm_content not in {'oferta-dm', 'lembrete-dm', 'oferta-dm-verde', 'oferta-dm-amarelo', 'oferta-dm-vermelho'}:
         raise HTTPException(400, 'Destino inválido')
     with core().db() as conn:
         conn.execute('UPDATE dm_leads SET ebook_clicked_at=COALESCE(ebook_clicked_at,?) WHERE subscriber_id=?', (core().now_utc().isoformat(), s))
@@ -299,6 +379,17 @@ def redirect(s: str, to: str = 'ebook', utm_content: str = 'oferta-dm'):
     query = dict(parse_qsl(url.query, keep_blank_values=True))
     query.update(utm_source='manychat', utm_medium='dm', utm_campaign='dm-mapa', utm_content=utm_content)
     return RedirectResponse(urlunsplit(url._replace(query=urlencode(query))), status_code=302)
+
+
+@router.get('/dm/descadastrar')
+@router.post('/dm/descadastrar')
+def unsubscribe(s: str, t: str):
+    if not os.environ.get('UNSUB_SECRET') or not secrets.compare_digest(t, core().unsubscribe_token('dm:' + s)):
+        raise HTTPException(400, 'Token inválido')
+    with core().db() as conn:
+        conn.execute('UPDATE dm_leads SET unsubscribed_at=COALESCE(unsubscribed_at,?) WHERE subscriber_id=?',
+                     (core().now_utc().isoformat(), s))
+    return PlainTextResponse('Descadastro realizado.')
 
 
 @router.get('/admin/dm/leads')

@@ -1,6 +1,5 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,8 +12,8 @@ def utc(y, m, d, hour, minute=0):
 
 
 @pytest.fixture
-def client(monkeypatch):
-    test_db = Path(__file__).with_name("abandono-test.db")
+def client(monkeypatch, tmp_path):
+    test_db = tmp_path / "abandono-test.db"
     test_db.unlink(missing_ok=True)
     monkeypatch.setattr(main, "DB_PATH", str(test_db))
     monkeypatch.setenv("LEAD_WEBHOOK_SECRET", "lead-secret")
