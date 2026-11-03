@@ -1,4 +1,5 @@
 import os
+import logging
 import re
 import json
 import sqlite3
@@ -31,6 +32,25 @@ WHATSAPP_GROUP_URL_DEFAULT = os.environ.get("WHATSAPP_GROUP_URL", "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 MANYCHAT_API_KEY = os.environ.get("MANYCHAT_API_KEY", "")
 MANYCHAT_BUYER_TAG = os.environ.get("MANYCHAT_BUYER_TAG", "comprou-live")
+BONUS_PAYMENT_LINK_IDS = {value.strip() for value in os.environ.get("BONUS_PAYMENT_LINK_IDS", "").split(",") if value.strip()}
+
+
+def env_ids(name: str, default: str) -> set[str]:
+    return {value.strip() for value in os.environ.get(name, default).split(",") if value.strip()}
+
+
+LIVE_PAYMENT_LINK_IDS = env_ids("LIVE_PAYMENT_LINK_IDS", "5130e417-e54e-4ea6-b665-9011cd1ae9f6,d8e43409-e35c-48f0-8fb7-43b7f72bf30d")
+LIVE_BUMP_IDS = env_ids("LIVE_BUMP_IDS", "c8f0cbfc-14b4-4762-a4be-78507345824b")
+EBOOK_PAYMENT_LINK_IDS = env_ids("EBOOK_PAYMENT_LINK_IDS", "d6000597-5cf2-4cc9-8dc5-db34a1522111")
+GI_PAYMENT_LINK_IDS = env_ids("GI_PAYMENT_LINK_IDS", "8748e80f-7cba-41f7-a2a7-65c84a2105b3")
+EBOOK_DOWNLOAD_URL = os.environ.get("EBOOK_DOWNLOAD_URL", "").strip()
+logger = logging.getLogger(__name__)
+
+
+BONUS_AULA_URL = os.environ.get("BONUS_AULA_URL", "")
+BONUS_AULA_TITLE = os.environ.get("BONUS_AULA_TITLE", "Aula extra: Como conduzir a primeira conversa de feedback depois da live")
+BUMP_KIT_URL = os.environ.get("BUMP_KIT_URL", "")
+BUMP_KIT_TITLE = os.environ.get("BUMP_KIT_TITLE", "Kit DISC + Roteiros de Feedback")
 ACCEPTED_STATUSES = {"paid", "approved", "completed", "confirmed", "received"}
 BRT = ZoneInfo("America/Sao_Paulo")
 CHECKOUT_URL_STD_DEFAULT = "https://pay.ogrupozentra.com/checkout/link/5130e417-e54e-4ea6-b665-9011cd1ae9f6"
@@ -76,6 +96,15 @@ def init_db():
             )
             """
         )
+        buyer_columns = {row["name"] for row in conn.execute("PRAGMA table_info(compradores)").fetchall()}
+        for column, definition in (
+            ("produto", "TEXT DEFAULT 'live'"),
+            ("payment_link_id", "TEXT"),
+            ("bump_ids", "TEXT"),
+            ("bump_amount_cents", "INTEGER DEFAULT 0"),
+        ):
+            if column not in buyer_columns:
+                conn.execute(f"ALTER TABLE compradores ADD COLUMN {column} {definition}")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)"
         )
@@ -155,6 +184,12 @@ def extract_lead(payload: dict) -> dict | None:
         status = str(payload.get("status", "")).lower()
         if status not in ACCEPTED_STATUSES:
             return None
+        bump_ids = payload.get("bump_ids", [])
+        if not isinstance(bump_ids, list) or not all(isinstance(item, str) for item in bump_ids):
+            bump_ids = []
+        bump_amount_cents = payload.get("bump_amount_cents", 0)
+        if not isinstance(bump_amount_cents, int) or isinstance(bump_amount_cents, bool):
+            bump_amount_cents = 0
         return {
             "transaction_id": str(payload["transaction_id"]),
             "nome": payload.get("nome") or payload.get("name") or "",
@@ -162,6 +197,9 @@ def extract_lead(payload: dict) -> dict | None:
             "telefone": payload.get("telefone") or payload.get("phone") or "",
             "valor": int(payload.get("valor_cents") or payload.get("valor") or 0),
             "status": status,
+            "payment_link_id": str(payload.get("payment_link_id") or ""),
+            "bump_ids": bump_ids,
+            "bump_amount_cents": bump_amount_cents,
         }
 
     # Formato cru tipo Asaas: {event, payment: {id, value, status, customer:{...}}}
@@ -202,18 +240,63 @@ def extract_lead(payload: dict) -> dict | None:
         "telefone": telefone,
         "valor": valor_cents,
         "status": normalized_status if normalized_status in ACCEPTED_STATUSES else "paid",
+        "payment_link_id": "",
+        "bump_ids": [],
+        "bump_amount_cents": 0,
     }
 
 
-def send_confirmation_email(nome: str, email: str):
-    if not RESEND_API_KEY or not email:
-        print(f"[email] skip — RESEND_API_KEY ausente ou email vazio (email={email!r})")
+def addon_flags(payment_link_id: str, bump_ids: list[str]) -> tuple[bool, bool]:
+    return payment_link_id in BONUS_PAYMENT_LINK_IDS, bool(set(bump_ids) - LIVE_BUMP_IDS)
+
+
+def classify_product(payment_link_id: str, bump_ids: list[str]) -> str:
+    products = []
+    if payment_link_id in EBOOK_PAYMENT_LINK_IDS:
+        products.append("ebook")
+    if payment_link_id in GI_PAYMENT_LINK_IDS:
+        products.append("gi")
+    if payment_link_id in LIVE_PAYMENT_LINK_IDS | BONUS_PAYMENT_LINK_IDS or set(bump_ids) & LIVE_BUMP_IDS:
+        products.append("live")
+    return "+".join(products) or "outro"
+
+
+def send_product_email(nome: str, email: str, produto: str):
+    if produto == "ebook" and not EBOOK_DOWNLOAD_URL:
+        logger.warning("EBOOK_DOWNLOAD_URL ausente: entrega do ebook não enviada")
         return
+    if not RESEND_API_KEY or not email:
+        return
+    subject = "Seu ebook CEBEC" if produto == "ebook" else "Boas-vindas à formação Gestão de Impacto"
+    try:
+        resend.Emails.send({
+            "from": RESEND_FROM, "to": [email], "subject": subject,
+            "html": email_layout.render_product_email(nome, produto, EBOOK_DOWNLOAD_URL),
+        })
+    except Exception:
+        logger.error("Falha ao enviar email do produto %s", produto)
 
-    primeiro_nome = (nome or "").strip().split(" ")[0] or "tudo bem"
+
+def render_confirmation_email(nome: str, has_bonus: bool = False, has_bump: bool = False) -> str:
+    primeiro_nome = html_lib.escape((nome or "").strip().split(" ")[0] or "tudo bem")
     redirect_url = "https://live.angelapelizer.com/cebec/entrar-grupo"
+    addon_blocks = ""
+    if has_bonus and BONUS_AULA_URL:
+        addon_blocks += f"""
+        <div style="margin:20px 0; padding:20px; border:1px solid #D9B061; border-radius:4px; background:#F5F4F0;">
+          <h2 style="font-size:17px; margin:0 0 10px; color:#0B1929;">Seu bônus do diagnóstico</h2>
+          <p style="font-size:14px; line-height:1.6; margin:0 0 16px;">{html_lib.escape(BONUS_AULA_TITLE)}</p>
+          <a href="{html_lib.escape(BONUS_AULA_URL, quote=True)}" style="background:#3D7A45; color:#F5F4F0; text-decoration:none; padding:13px 24px; border-radius:4px; font-weight:700; display:block; text-align:center;">Assistir à aula extra</a>
+        </div>"""
+    if has_bump and BUMP_KIT_URL:
+        addon_blocks += f"""
+        <div style="margin:20px 0; padding:20px; border:1px solid #D9B061; border-radius:4px; background:#F5F4F0;">
+          <h2 style="font-size:17px; margin:0 0 10px; color:#0B1929;">Seu material adicional</h2>
+          <p style="font-size:14px; line-height:1.6; margin:0 0 16px;">{html_lib.escape(BUMP_KIT_TITLE)}</p>
+          <a href="{html_lib.escape(BUMP_KIT_URL, quote=True)}" style="background:#3D7A45; color:#F5F4F0; text-decoration:none; padding:13px 24px; border-radius:4px; font-weight:700; display:block; text-align:center;">Baixar o Kit</a>
+        </div>"""
 
-    html = f"""
+    return f"""
     <div style="font-family: -apple-system, Segoe UI, Arial, sans-serif; max-width: 560px; margin: 0 auto; color:#0B1929;">
       <div style="background:#0B1929; padding: 28px 32px; text-align:center;">
         <span style="color:#F5F4F0; font-size:13px; letter-spacing:0.18em; text-transform:uppercase;">CEBEC · Angela Pelizer</span>
@@ -241,6 +324,7 @@ def send_confirmation_email(nome: str, email: str):
             Acessar a live
           </a>
         </div>
+        {addon_blocks}
         <p style="font-size:14px; line-height:1.6; color:#333;">
           Guarde este e-mail: o link da live é o mesmo na segunda às 19h.
         </p>
@@ -250,6 +334,18 @@ def send_confirmation_email(nome: str, email: str):
       </div>
     </div>
     """
+
+
+def send_confirmation_email(nome: str, email: str, has_bonus: bool = False, has_bump: bool = False):
+    if has_bonus and not BONUS_AULA_URL:
+        print("[email] ATENÇÃO: bônus comprado mas URL não configurada")
+    if has_bump and not BUMP_KIT_URL:
+        print("[email] ATENÇÃO: bump comprado mas URL não configurada")
+    if not RESEND_API_KEY or not email:
+        print(f"[email] skip — RESEND_API_KEY ausente ou email vazio (email={email!r})")
+        return
+
+    html = render_confirmation_email(nome, has_bonus, has_bump)
 
     try:
         resend.Emails.send(
@@ -348,7 +444,7 @@ def lead_has_bought(conn: sqlite3.Connection, email: str, telefone: str, live_at
     since = iso_utc(live_at - timedelta(days=7))
     phone = normalize_buyer_phone(telefone)
     rows = conn.execute(
-        "SELECT email, telefone FROM compradores WHERE data_compra >= ?", (since,)
+        "SELECT email, telefone FROM compradores WHERE produto LIKE '%live%' AND data_compra >= ?", (since,)
     ).fetchall()
     email = (email or "").strip().lower()
     return any(
@@ -394,7 +490,7 @@ def get_week_sales(conn: sqlite3.Connection, live: datetime, include_recent: boo
     excluded = {x.strip().lower() for x in os.environ.get("TEST_EMAILS", "").split(",") if x.strip()}
     rows = conn.execute(
         "SELECT nome, email, data_compra, transaction_id FROM compradores "
-        "WHERE data_compra > ? AND data_compra <= ? ORDER BY data_compra DESC", (start, end)
+        "WHERE produto LIKE '%live%' AND data_compra > ? AND data_compra <= ? ORDER BY data_compra DESC", (start, end)
     ).fetchall()
     clean, seen = [], set()
     for row in rows:
@@ -677,6 +773,7 @@ async def webhook_zpay(request: Request, background_tasks: BackgroundTasks):
         # evento não é pagamento aprovado — ack e ignora, sem retry storm
         return JSONResponse({"status": "ignored"}, status_code=200)
 
+    produto = classify_product(lead["payment_link_id"], lead["bump_ids"])
     with db() as conn:
         existing = conn.execute(
             "SELECT id FROM compradores WHERE transaction_id = ?",
@@ -687,8 +784,11 @@ async def webhook_zpay(request: Request, background_tasks: BackgroundTasks):
 
         conn.execute(
             """
-            INSERT INTO compradores (transaction_id, nome, email, telefone, valor, data_compra, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO compradores (
+                transaction_id, nome, email, telefone, valor, data_compra, status,
+                payment_link_id, bump_ids, bump_amount_cents, produto
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 lead["transaction_id"],
@@ -698,11 +798,22 @@ async def webhook_zpay(request: Request, background_tasks: BackgroundTasks):
                 lead["valor"],
                 datetime.now(timezone.utc).isoformat(),
                 lead["status"],
+                lead["payment_link_id"],
+                json.dumps(lead["bump_ids"]),
+                lead["bump_amount_cents"],
+                produto,
             ),
         )
 
-    background_tasks.add_task(send_confirmation_email, lead["nome"], lead["email"])
-    background_tasks.add_task(tag_manychat_buyer, lead["email"], lead["telefone"])
+    has_bonus, has_bump = addon_flags(lead["payment_link_id"], lead["bump_ids"])
+    if "live" in produto.split("+"):
+        background_tasks.add_task(send_confirmation_email, lead["nome"], lead["email"], has_bonus, has_bump)
+        background_tasks.add_task(tag_manychat_buyer, lead["email"], lead["telefone"])
+    for product in ("ebook", "gi"):
+        if product in produto.split("+"):
+            background_tasks.add_task(send_product_email, lead["nome"], lead["email"], product)
+    if produto == "outro":
+        logger.info("Compra registrada como produto=outro; nenhuma entrega de live agendada")
 
     return JSONResponse({"status": "ok"}, status_code=200)
 
@@ -717,8 +828,8 @@ def leads_semana(
     since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     with db() as conn:
         rows = conn.execute(
-            "SELECT nome, telefone, email, data_compra, valor, status FROM compradores "
-            "WHERE data_compra >= ? ORDER BY data_compra DESC",
+            "SELECT nome, telefone, email, data_compra, valor, status, produto FROM compradores "
+            "WHERE produto LIKE '%live%' AND data_compra >= ? ORDER BY data_compra DESC",
             (since,),
         ).fetchall()
 
@@ -727,9 +838,9 @@ def leads_semana(
     if format == "csv":
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(["nome", "whatsapp", "email", "data_compra", "valor_centavos", "status"])
+        writer.writerow(["nome", "whatsapp", "email", "data_compra", "valor_centavos", "status", "produto"])
         for l in leads:
-            writer.writerow([l["nome"], l["telefone"], l["email"], l["data_compra"], l["valor"], l["status"]])
+            writer.writerow([l["nome"], l["telefone"], l["email"], l["data_compra"], l["valor"], l["status"], l["produto"]])
         return PlainTextResponse(buf.getvalue(), media_type="text/csv")
 
     return {"count": len(leads), "leads": leads}

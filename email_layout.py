@@ -118,3 +118,27 @@ def render(*, step, preheader, paragraphs, cta_label, cta_url, after_cta, data_l
 </table>
 <img src="{open_pixel_url}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0">
 </body></html>"""
+
+
+def render_product_email(nome: str, produto: str, download_url: str = "") -> str:
+    """Entrega transacional com a identidade visual CEBEC, sem links da live."""
+    from html import escape
+
+    name = escape((nome or "").strip().split(" ")[0] or "tudo bem")
+    if produto == "ebook":
+        title = "Seu ebook chegou!"
+        content = "Sua compra foi confirmada. Baixe seu ebook pelo botão abaixo."
+        button = _button(escape(download_url, quote=True), "Baixar o ebook")
+    else:
+        title = "Boas-vindas à formação Gestão de Impacto!"
+        content = "A equipe CEBEC entra em contato em até 1 dia útil com seu acesso."
+        button = ""
+    return f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"></head>
+<body style="margin:0;background:{PAPER};font-family:{SANS};color:{TEXT}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+<table role="presentation" width="600" style="width:100%;max-width:600px;background:#FFFFFF" cellpadding="0" cellspacing="0">
+<tr><td align="center" style="background:{NAVY};padding:26px"><img src="{LOGO}" width="170" alt="CEBEC · Angela Pelizer"></td></tr>
+<tr><td style="padding:32px"><h1 style="color:{NAVY};font-family:{SERIF}">{title}</h1>
+<p>Oi, {name}!</p><p style="line-height:1.65">{content}</p>{button}{_signature()}
+<p style="color:{MUTED};font-size:13px">Qualquer dúvida, é só responder este e-mail.</p>
+</td></tr></table></td></tr></table></body></html>"""
