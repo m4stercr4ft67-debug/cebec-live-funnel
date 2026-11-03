@@ -860,3 +860,6 @@ async def update_config(request: Request, authorization: str | None = Header(def
             (url,),
         )
     return {"status": "ok", "whatsapp_group_url": url}
+
+from dm_mapa import router as dm_mapa_router
+app.include_router(dm_mapa_router)
