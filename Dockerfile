@@ -5,7 +5,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py emails_abandono.py email_layout.py ./
+COPY main.py emails_abandono.py email_layout.py dm_mapa.py ./
+COPY static ./static
 
 RUN mkdir -p /app/data
 

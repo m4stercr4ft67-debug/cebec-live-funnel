@@ -1,5 +1,6 @@
 """Funil Instagram MAPA, com estado e entregas persistidos em SQLite."""
 import asyncio
+from pathlib import Path
 import csv
 import html
 import io
@@ -12,7 +13,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
-from fastapi.responses import RedirectResponse, PlainTextResponse
+from fastapi.responses import FileResponse, RedirectResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 router = APIRouter()
@@ -406,6 +407,16 @@ async def shutdown():
             await task
         except asyncio.CancelledError:
             pass
+
+
+PDF_FILE = Path(__file__).resolve().parent / 'static' / '5_Perguntas_Equipe_Adoecendo_CEBEC.pdf'
+
+
+@router.get('/dm/5-perguntas.pdf')
+def pdf_5_perguntas():
+    if not PDF_FILE.exists():
+        raise HTTPException(404)
+    return FileResponse(PDF_FILE, media_type='application/pdf', filename=PDF_FILE.name)
 
 
 @router.get('/dm/r')

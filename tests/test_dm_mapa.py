@@ -380,3 +380,18 @@ def test_schema_migration_preserves_leads(env):
     dm.init_db()
     assert lead()['state'] == 'awaiting_email'
     assert lead()['score'] is None
+
+
+def test_pdf_5_perguntas_served():
+    from fastapi.testclient import TestClient
+    import main
+    r = TestClient(main.app).get('/dm/5-perguntas.pdf')
+    assert r.status_code == 200 and r.headers['content-type'] == 'application/pdf' and r.content[:4] == b'%PDF'
+
+
+def test_dockerfile_copies_all_modules():
+    import pathlib
+    df = (pathlib.Path(__file__).resolve().parents[1] / 'Dockerfile').read_text()
+    for mod in ['main.py', 'emails_abandono.py', 'email_layout.py', 'dm_mapa.py']:
+        assert mod in df
+    assert 'COPY static' in df
