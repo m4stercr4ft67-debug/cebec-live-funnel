@@ -284,7 +284,7 @@ def test_full_contact_email(env, monkeypatch, sid, configured):
     response = full_contact(env, id=sid, email=' ANA@EMPRESA.COM.BR ')
     assert response.status_code == 200
     content = response.json()['content']
-    assert content['messages'][0]['text'].startswith('Pergunta 1 de 5')
+    assert content['messages'][-1]['text'].startswith('Pergunta 1 de 5') and len(content['messages']) == 2
     assert content['actions'] == dm.tags('lead-mapa') + (
         [dm.field('email_mapa', 'ana@empresa.com.br')] if configured else [])
     assert content['quick_replies'][0]['payload'] == {'subscriber_id': '123'}
