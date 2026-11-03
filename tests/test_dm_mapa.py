@@ -476,3 +476,15 @@ def test_excluded_family_text_does_not_advance(env, username):
     before = lead()
     assert full_contact(env, ig_username=username, last_input_text='Sim').json() == dm.EMPTY
     assert lead() == before
+
+
+def test_entry_flag_restarts_existing_lead(env):
+    assert 'Pergunta 1 de 5' in str(full_contact(env, email='a@exemplo.com.br').json())
+    full_contact(env, last_input_text='Sim, frequente')
+    assert lead()['state'] == 'q2'
+    stuck = full_contact(env, email='a@exemplo.com.br', last_input_text='a@exemplo.com.br')
+    assert 'Pergunta 1 de 5' not in str(stuck.json())
+    payload = {'id': '123', 'ig_username': 'ana.rh', 'email': 'a@exemplo.com.br', 'last_input_text': 'a@exemplo.com.br', 'tags': []}
+    again = env[0].post('/dm/mapa?entry=1', headers={'Authorization': 'Bearer secret'}, json=payload)
+    assert 'Pergunta 1 de 5' in str(again.json())
+    assert lead()['state'] == 'q1' and lead()['q1'] is None

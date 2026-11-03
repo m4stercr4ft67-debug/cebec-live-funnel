@@ -224,7 +224,8 @@ def accepted(conn, sid, now):
 
 
 @router.post('/dm/mapa')
-def mapa(body: Incoming, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
+def mapa(body: Incoming, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None),
+         entry: str = ''):
     authorize(authorization)
     incoming_tags = body.tags
     if excluded(body):
@@ -245,7 +246,7 @@ def mapa(body: Incoming, background_tasks: BackgroundTasks, authorization: str |
             accepted(conn, sid, now)
             background_tasks.add_task(worker_once)
             return block('Obrigada! A equipe do CEBEC vai te chamar por aqui.', tags('qualificado-b2b', 'b2b-aceitou-contato'))
-        if not lead or text.upper() == 'MAPA':
+        if not lead or entry == '1' or text.upper() == 'MAPA':
             conn.execute("UPDATE dm_leads SET state='awaiting_email',email_attempts=0,q1=NULL,q2=NULL,q3=NULL,q4=NULL,q5=NULL,score=NULL WHERE subscriber_id=?", (sid,))
             email = body.email.strip().lower()
             if valid_email(email):
@@ -315,7 +316,9 @@ def handle_step(conn, lead, sid, step, v, now, background_tasks):
         conn.execute("UPDATE dm_leads SET state='awaiting_cargo' WHERE subscriber_id=?", (sid,))
         enqueue(conn, sid, 'd0', now)
         background_tasks.add_task(worker_once)
-        plan = PLAN + ('\n\nTe mandei tudo por e-mail também, com o material completo em PDF.' if lead['email'] else '')
+        pdf = os.environ.get('PDF_URL', '').strip()
+        plan = PLAN + (f'\n\n📄 Baixe aqui o material completo (PDF):\n{pdf}' if pdf else '') + (
+            '\n\nTambém mandei no seu e-mail.' if lead['email'] else '')
         return block('', [field('score_mapa', score)] + tags('mapa-' + band(score)),
                      replies(sid, 'cargo', CARGOS), [
                          {'type': 'text', 'text': result_text(score)},
