@@ -266,6 +266,97 @@ def test_configured_exclusion(env, monkeypatch):
     assert send(env, 'MAPA').json() == dm.EMPTY
 
 
+def full_contact(env, **overrides):
+    payload = {'id': '123', 'key': 'user:123', 'page_id': 'page', 'status': 'active',
+               'first_name': 'Ana', 'last_name': 'Silva', 'name': 'Ana Silva',
+               'ig_username': 'ana.rh', 'ig_id': 123, 'phone': None,
+               'last_input_text': 'MAPA', 'email': None,
+               'tags': [{'id': 97229721, 'name': 'lead-mapa'}],
+               'custom_fields': {'cargo': None, 'porte': None}, **overrides}
+    return env[0].post('/dm/mapa', headers={'Authorization': 'Bearer secret'}, json=payload)
+
+
+@pytest.mark.parametrize('sid', ['123', 123])
+@pytest.mark.parametrize('configured', [False, True])
+def test_full_contact_email(env, monkeypatch, sid, configured):
+    if configured:
+        monkeypatch.setenv('MANYCHAT_EMAIL_MAPA_FIELD_EXISTS', '1')
+    response = full_contact(env, id=sid, email=' ANA@EMPRESA.COM.BR ')
+    assert response.status_code == 200
+    content = response.json()['content']
+    assert content['messages'][0]['text'].startswith('Pergunta 1 de 5')
+    assert content['actions'] == dm.tags('lead-mapa') + (
+        [dm.field('email_mapa', 'ana@empresa.com.br')] if configured else [])
+    assert content['quick_replies'][0]['payload'] == {'subscriber_id': '123'}
+    assert lead()['state'] == 'q1'
+    assert lead()['email'] == 'ana@empresa.com.br'
+    assert lead()['nome'] == 'Ana Silva'
+    assert cb(env, 'q1', '2').status_code == 200
+    assert lead()['state'] == 'q2'
+
+
+@pytest.mark.parametrize('email', [None, '', 'bad', 'a@b.c'])
+def test_full_contact_without_valid_email(env, email):
+    response = full_contact(env, email=email, first_name=None, last_name=None,
+                            ig_username=None, last_input_text=None, tags=None)
+    assert response.status_code == 200
+    assert 'Qual seu melhor e-mail?' in response.json()['content']['messages'][0]['text']
+    assert lead()['state'] == 'awaiting_email'
+    assert lead()['email'] is None
+    assert lead()['nome'] == ''
+    assert lead()['ig_username'] == ''
+
+
+@pytest.mark.parametrize('tags', [' lead-mapa, lead-mapa ', ['lead-mapa'],
+                                 [{'id': 1, 'name': 'lead-mapa'}]])
+def test_full_contact_tags_empresa(env, tags):
+    response = full_contact(env, last_input_text='EMPRESA', tags=tags)
+    assert response.status_code == 200
+    assert lead()['contact_accepted'] == 1
+    assert env[2].call_count == 1
+
+
+@pytest.mark.parametrize('payload', [
+    {'tags': [{'id': 1, 'name': ' nao-responder-bot '}]},
+    {'tags': ['lead-mapa', 'nao-responder-bot']},
+    {'ig_username': '@ROGER.ARRUDA_'},
+])
+def test_full_contact_exclusions(env, payload):
+    assert full_contact(env, email='ana@example.org', **payload).json() == dm.EMPTY
+    response = env[0].post('/dm/mapa/cb?step=q1&v=2',
+                           headers={'Authorization': 'Bearer secret'}, json={'id': 123, **payload})
+    assert response.json() == dm.EMPTY
+    with main.db() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM dm_leads').fetchone()[0] == 0
+    assert not env[2].called and not env[3].called and not env[4].called
+
+
+def test_full_contact_restart_and_legacy_precedence(env):
+    send(env, 'MAPA')
+    send(env, 'old@example.org')
+    cb(env, 'q1', '2')
+    response = full_contact(env, email='new@example.org', last_input_text=' mapa ')
+    assert response.status_code == 200
+    assert lead()['state'] == 'q1'
+    assert lead()['q1'] is None and lead()['score'] is None
+    assert lead()['email_attempts'] == 0
+    assert lead()['email'] == 'new@example.org'
+    response = full_contact(env, subscriber_id='123', id='other', text='obrigada',
+                            email='ignored@example.org')
+    assert response.json() == dm.EMPTY
+    assert lead()['email'] == 'new@example.org'
+
+
+def test_incoming_normalization():
+    body = dm.Incoming(id=123, text=None, last_input_text=None,
+                       tags=[{'name': ' lead-mapa '}, 'lead-mapa', {'name': None}])
+    assert body.subscriber_id == '123'
+    assert body.text == ''
+    assert body.tags == {'lead-mapa'}
+    with pytest.raises(ValueError):
+        dm.Incoming(id=None)
+
+
 @pytest.mark.parametrize('score,expected', [(0,'verde'), (3,'verde'), (4,'amarelo'), (6,'amarelo'), (7,'vermelho'), (10,'vermelho')])
 def test_offer_bands(env, score, expected):
     deliver(env, 'gestor')

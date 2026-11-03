@@ -13,7 +13,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from fastapi.responses import RedirectResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ PLAN = ('Seu plano de 30 dias, um passo por semana:\n'
 def excluded(body):
     usernames = {x.strip().lstrip('@').casefold() for x in os.environ.get(
         'DM_EXCLUDE_IG', 'roger.arruda_,jaopelizer').split(',') if x.strip()}
-    return ('nao-responder-bot' in {x.strip() for x in body.tags.split(',')}
+    return ('nao-responder-bot' in body.tags
             or body.ig_username.strip().lstrip('@').casefold() in usernames)
 
 
@@ -96,12 +96,44 @@ def init_db():
 
 
 class Incoming(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+
     subscriber_id: str = Field(min_length=1, max_length=200)
     first_name: str = ''
     last_name: str = ''
     ig_username: str = ''
     text: str = ''
-    tags: str = ''
+    email: str = ''
+    tags: set[str] = Field(default_factory=set)
+
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_aliases(cls, data):
+        if isinstance(data, dict):
+            data = dict(data)
+            data['subscriber_id'] = data.get('subscriber_id') or data.get('id')
+            data['text'] = data.get('text') or data.get('last_input_text') or ''
+        return data
+
+    @field_validator('subscriber_id', 'first_name', 'last_name', 'ig_username', 'text', 'email', mode='before')
+    @classmethod
+    def normalize_strings(cls, value):
+        return '' if value is None else str(value)
+
+    @field_validator('tags', mode='before')
+    @classmethod
+    def normalize_tags(cls, value):
+        if value is None:
+            return set()
+        if isinstance(value, str):
+            value = value.split(',')
+        return {name.strip() for item in value
+                if isinstance(name := item.get('name') if isinstance(item, dict) else item, str)
+                and name.strip()}
+
+
+def valid_email(email):
+    return bool(re.fullmatch(r'[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)*\.[a-zA-Z]{2,}', email))
 
 
 def authorize(authorization):
@@ -147,7 +179,7 @@ def accepted(conn, sid, now):
 @router.post('/dm/mapa')
 def mapa(body: Incoming, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
     authorize(authorization)
-    incoming_tags = {x.strip() for x in body.tags.split(',')}
+    incoming_tags = body.tags
     if excluded(body):
         return EMPTY
     sid, now = body.subscriber_id, core().now_utc()
@@ -168,11 +200,18 @@ def mapa(body: Incoming, background_tasks: BackgroundTasks, authorization: str |
             return block('Obrigada! A equipe do CEBEC vai te chamar por aqui.', tags('qualificado-b2b', 'b2b-aceitou-contato'))
         if not lead or text.upper() == 'MAPA':
             conn.execute("UPDATE dm_leads SET state='awaiting_email',email_attempts=0,q1=NULL,q2=NULL,q3=NULL,q4=NULL,q5=NULL,score=NULL WHERE subscriber_id=?", (sid,))
+            email = body.email.strip().lower()
+            if valid_email(email):
+                conn.execute("UPDATE dm_leads SET state='q1',email=? WHERE subscriber_id=?", (email, sid))
+                actions = tags('lead-mapa')
+                if os.environ.get('MANYCHAT_EMAIL_MAPA_FIELD_EXISTS') == '1':
+                    actions.append(field('email_mapa', email))
+                return question(sid, 1, 'Oi! Aqui é da equipe da Dra. Angela 👋 Vou te mandar 5 perguntas rápidas pra descobrir se sua equipe está adoecendo. Pensa nas últimas semanas, não num dia ruim 👇', actions)
             return block('Oi! Aqui é da equipe da Dra. Angela 👋 Te mando agora as 5 perguntas pra descobrir se sua equipe está adoecendo. Qual seu melhor e-mail?\n\nUsamos seu e-mail só para enviar conteúdos do CEBEC. Você pode sair quando quiser.', tags('lead-mapa'))
         if lead['state'] != 'awaiting_email':
             return EMPTY
         email = text.lower()
-        valid = bool(re.fullmatch(r'[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)*\.[a-zA-Z]{2,}', email))
+        valid = valid_email(email)
         attempts = lead['email_attempts'] + 1
         if not valid and attempts < 3:
             conn.execute('UPDATE dm_leads SET email_attempts=? WHERE subscriber_id=?', (attempts, sid))
