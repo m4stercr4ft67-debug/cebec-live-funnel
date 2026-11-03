@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import secrets
+import unicodedata
 from datetime import timedelta, datetime
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
@@ -29,6 +30,14 @@ QUESTIONS = [
     'Em reunião, quase ninguém discorda ou traz um problema antes de virar crise?',
 ]
 ANSWERS = {'0': 'Não', '1': 'Às vezes', '2': 'Sim, frequente'}
+B2B = {'sim': 'Sim', 'nao': 'Agora não'}
+CHOICES = {'cargo': CARGOS, 'porte': PORTES, 'b2b': B2B,
+           **{f'q{i}': ANSWERS for i in range(1, 6)}}
+PROMPTS = {
+    'cargo': 'Pra eu te indicar o próximo passo certo: qual é o seu papel hoje?',
+    'porte': 'E quantas pessoas trabalham na empresa?',
+    'b2b': 'Vi que você cuida de uma empresa com bastante gente. Faz sentido a equipe do CEBEC te chamar aqui pra entender como vocês estão com a saúde da equipe?',
+}
 PLAN = ('Seu plano de 30 dias, um passo por semana:\n'
         '1. Escolha a pergunta que mais pesou e anote 3 situações reais.\n'
         '2. Converse com duas pessoas, sem julgamento.\n'
@@ -161,10 +170,47 @@ def block(text, actions=None, replies=None, messages=None):
 
 
 def replies(sid, step, options):
+    flow = os.environ.get('DM_REPLY_FLOW_NS')
+    if flow:
+        return [{'type': 'flow', 'caption': caption, 'target': flow}
+                for caption in options.values()]
     return [{'type': 'dynamic_block_callback', 'caption': caption,
              'url': base_url() + '/dm/mapa/cb?' + urlencode({'step': step, 'v': value}),
              'method': 'post', 'headers': {'Authorization': 'Bearer ' + os.environ.get('DM_WEBHOOK_SECRET', '')},
              'payload': {'subscriber_id': sid}} for value, caption in options.items()]
+
+
+def normalize_choice(text):
+    text = unicodedata.normalize('NFKD', text.casefold())
+    text = ''.join(c for c in text if not unicodedata.category(c).startswith(('M', 'S'))
+                   and c != '\u200d')
+    text = text.strip()
+    while text and unicodedata.category(text[-1]).startswith('P'):
+        text = text[:-1].rstrip()
+    return ' '.join(text.split())
+
+
+def match_choice(step, text):
+    normalized = normalize_choice(text)
+    for value, caption in CHOICES[step].items():
+        if normalized in {normalize_choice(value), normalize_choice(caption)}:
+            return value
+    aliases = {}
+    if step.startswith('q'):
+        aliases = {'nao': '0', 'n': '0', 'as vezes': '1', 'talvez': '1',
+                   'sim': '2', 's': '2', 'frequente': '2', 'sim frequente': '2'}
+    elif step == 'b2b':
+        aliases = {'sim': 'sim', 'quero': 'sim', 'pode': 'sim',
+                   'nao': 'nao', 'agora nao': 'nao'}
+    return aliases.get(normalized)
+
+
+def retry_choice(sid, step):
+    prefix = 'Não entendi 🙂 Toca numa das opções abaixo:'
+    if step.startswith('q'):
+        return question(sid, int(step[1]), prefix)
+    return block('', replies=replies(sid, step, CHOICES[step]), messages=[
+        {'type': 'text', 'text': prefix}, {'type': 'text', 'text': PROMPTS[step]}])
 
 
 def enqueue(conn, sid, kind, when):
@@ -210,7 +256,16 @@ def mapa(body: Incoming, background_tasks: BackgroundTasks, authorization: str |
                 return question(sid, 1, 'Anotado! Agora responde rapidinho, pensando nas últimas semanas (não num dia ruim). São 5 perguntas 👇', actions)
             return block('Oi! Aqui é da equipe da Dra. Angela 👋 Te mando agora as 5 perguntas pra descobrir se sua equipe está adoecendo. Qual seu melhor e-mail?\n\nUsamos seu e-mail só para enviar conteúdos do CEBEC. Você pode sair quando quiser.', tags('lead-mapa'))
         if lead['state'] != 'awaiting_email':
-            return EMPTY
+            step = {'awaiting_cargo': 'cargo', 'awaiting_porte': 'porte'}.get(
+                lead['state'], lead['state'])
+            if step == 'delivered' and lead['b2b'] and not lead['contact_accepted']:
+                step = 'b2b'
+            if step not in CHOICES:
+                return EMPTY
+            value = match_choice(step, text)
+            if value is None:
+                return retry_choice(sid, step)
+            return handle_step(conn, lead, sid, step, value, now, background_tasks)
         email = text.lower()
         valid = valid_email(email)
         attempts = lead['email_attempts'] + 1
@@ -230,8 +285,7 @@ def callback(body: Incoming, step: str, v: str, background_tasks: BackgroundTask
     authorize(authorization)
     if excluded(body):
         return EMPTY
-    choices = {'cargo': CARGOS, 'porte': PORTES, 'b2b': {'sim': 'Sim', 'nao': 'Agora não'}}
-    choices.update({f'q{i}': ANSWERS for i in range(1, 6)})
+    choices = CHOICES
     if step not in choices or v not in choices[step]:
         raise HTTPException(400, 'Callback inválido')
     sid, now = body.subscriber_id, core().now_utc()
@@ -240,53 +294,58 @@ def callback(body: Incoming, step: str, v: str, background_tasks: BackgroundTask
         lead = conn.execute('SELECT * FROM dm_leads WHERE subscriber_id=?', (sid,)).fetchone()
         if not lead:
             return EMPTY
-        if step in {f'q{i}' for i in range(1, 6)}:
-            if lead['state'] != step and lead[step] is None:
-                return EMPTY
-            conn.execute(f'UPDATE dm_leads SET {step}=?,updated_at=?,last_user_at=? WHERE subscriber_id=?',
-                         (int(v), now.isoformat(), now.isoformat(), sid))
-            score = sum(int(v) if key == step else (lead[key] or 0) for key in choices if key.startswith('q'))
-            conn.execute('UPDATE dm_leads SET score=? WHERE subscriber_id=?', (score, sid))
-            if lead['state'] != step:
-                return block('', [field('score_mapa', score)], messages=[{'type': 'text', 'text': 'Resposta atualizada.'}])
-            number = int(step[1])
-            if number < 5:
-                conn.execute('UPDATE dm_leads SET state=? WHERE subscriber_id=?', (f'q{number + 1}', sid))
-                return question(sid, number + 1)
-            conn.execute("UPDATE dm_leads SET state='awaiting_cargo' WHERE subscriber_id=?", (sid,))
-            enqueue(conn, sid, 'd0', now)
-            background_tasks.add_task(worker_once)
-            plan = PLAN + ('\n\nTe mandei tudo por e-mail também, com o material completo em PDF.' if lead['email'] else '')
-            return block('', [field('score_mapa', score)] + tags('mapa-' + band(score)),
-                         replies(sid, 'cargo', CARGOS), [
-                             {'type': 'text', 'text': result_text(score)},
-                             {'type': 'text', 'text': plan},
-                             {'type': 'text', 'text': 'Pra eu te indicar o próximo passo certo: qual é o seu papel hoje?'}])
-        if step == 'b2b':
-            if lead['state'] != 'delivered' or not lead['b2b'] or lead['contact_accepted']:
-                return EMPTY
-        elif lead['state'] != 'awaiting_' + step:
+        return handle_step(conn, lead, sid, step, v, now, background_tasks)
+
+
+def handle_step(conn, lead, sid, step, v, now, background_tasks):
+    choices = CHOICES
+    if step in {f'q{i}' for i in range(1, 6)}:
+        if lead['state'] != step and lead[step] is None:
             return EMPTY
-        conn.execute('UPDATE dm_leads SET updated_at=?,last_user_at=? WHERE subscriber_id=?', (now.isoformat(), now.isoformat(), sid))
-        if step == 'cargo':
-            conn.execute("UPDATE dm_leads SET cargo=?,state='awaiting_porte' WHERE subscriber_id=?", (v, sid))
-            return block('E quantas pessoas trabalham na empresa?', [field('cargo', v)], replies(sid, 'porte', PORTES))
-        if step == 'b2b':
-            if v == 'nao':
-                return block('Tudo bem! Qualquer coisa é só chamar.')
-            accepted(conn, sid, now)
-            background_tasks.add_task(worker_once)
-            return block('Combinado! Alguém da equipe do CEBEC vai te chamar por aqui em breve.', tags('b2b-aceitou-contato'))
-        b2b = lead['cargo'] in {'rh', 'dono'} and v in {'50a200', '200mais'}
-        conn.execute("UPDATE dm_leads SET porte=?,b2b=?,state='delivered' WHERE subscriber_id=?", (v, b2b, sid))
-        for kind, delay in [('zrm', timedelta()), ('offer', timedelta(minutes=2)), ('reminder', timedelta(hours=22))]:
-            enqueue(conn, sid, kind, now + delay)
-        if b2b:
-            enqueue(conn, sid, 'alert_qualified', now)
+        conn.execute(f'UPDATE dm_leads SET {step}=?,updated_at=?,last_user_at=? WHERE subscriber_id=?',
+                     (int(v), now.isoformat(), now.isoformat(), sid))
+        score = sum(int(v) if key == step else (lead[key] or 0) for key in choices if key.startswith('q'))
+        conn.execute('UPDATE dm_leads SET score=? WHERE subscriber_id=?', (score, sid))
+        if lead['state'] != step:
+            return block('', [field('score_mapa', score)], messages=[{'type': 'text', 'text': 'Resposta atualizada.'}])
+        number = int(step[1])
+        if number < 5:
+            conn.execute('UPDATE dm_leads SET state=? WHERE subscriber_id=?', (f'q{number + 1}', sid))
+            return question(sid, number + 1)
+        conn.execute("UPDATE dm_leads SET state='awaiting_cargo' WHERE subscriber_id=?", (sid,))
+        enqueue(conn, sid, 'd0', now)
+        background_tasks.add_task(worker_once)
+        plan = PLAN + ('\n\nTe mandei tudo por e-mail também, com o material completo em PDF.' if lead['email'] else '')
+        return block('', [field('score_mapa', score)] + tags('mapa-' + band(score)),
+                     replies(sid, 'cargo', CARGOS), [
+                         {'type': 'text', 'text': result_text(score)},
+                         {'type': 'text', 'text': plan},
+                         {'type': 'text', 'text': PROMPTS['cargo']}])
+    if step == 'b2b':
+        if lead['state'] != 'delivered' or not lead['b2b'] or lead['contact_accepted']:
+            return EMPTY
+    elif lead['state'] != 'awaiting_' + step:
+        return EMPTY
+    conn.execute('UPDATE dm_leads SET updated_at=?,last_user_at=? WHERE subscriber_id=?', (now.isoformat(), now.isoformat(), sid))
+    if step == 'cargo':
+        conn.execute("UPDATE dm_leads SET cargo=?,state='awaiting_porte' WHERE subscriber_id=?", (v, sid))
+        return block(PROMPTS['porte'], [field('cargo', v)], replies(sid, 'porte', PORTES))
+    if step == 'b2b':
+        if v == 'nao':
+            return block('Tudo bem! Qualquer coisa é só chamar.')
+        accepted(conn, sid, now)
+        background_tasks.add_task(worker_once)
+        return block('Combinado! Alguém da equipe do CEBEC vai te chamar por aqui em breve.', tags('b2b-aceitou-contato'))
+    b2b = lead['cargo'] in {'rh', 'dono'} and v in {'50a200', '200mais'}
+    conn.execute("UPDATE dm_leads SET porte=?,b2b=?,state='delivered' WHERE subscriber_id=?", (v, b2b, sid))
+    for kind, delay in [('zrm', timedelta()), ('offer', timedelta(minutes=2)), ('reminder', timedelta(hours=22))]:
+        enqueue(conn, sid, kind, now + delay)
+    if b2b:
+        enqueue(conn, sid, 'alert_qualified', now)
     background_tasks.add_task(worker_once)
     messages = [{'type': 'text', 'text': 'Obrigada! 🙏'}]
     if b2b:
-        messages.append({'type': 'text', 'text': 'Vi que você cuida de uma empresa com bastante gente. Faz sentido a equipe do CEBEC te chamar aqui pra entender como vocês estão com a saúde da equipe?'})
+        messages.append({'type': 'text', 'text': PROMPTS['b2b']})
     return block('', [field('porte', v)] + (tags('qualificado-b2b') if b2b else []),
                  replies(sid, 'b2b', choices['b2b']) if b2b else None, messages)
 

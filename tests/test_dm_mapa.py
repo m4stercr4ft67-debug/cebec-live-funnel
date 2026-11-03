@@ -22,6 +22,7 @@ def env(tmp_path, monkeypatch):
         monkeypatch.setenv(key, value)
     monkeypatch.delenv('MANYCHAT_EMAIL_MAPA_FIELD_EXISTS', raising=False)
     monkeypatch.delenv('DM_EXCLUDE_IG', raising=False)
+    monkeypatch.delenv('DM_REPLY_FLOW_NS', raising=False)
     monkeypatch.setenv('UNSUB_SECRET', 'unsub-test')
     now = datetime(2026, 10, 31, 12, tzinfo=timezone.utc)
     monkeypatch.setattr(main, 'now_utc', lambda: now)
@@ -108,7 +109,7 @@ def test_delivery_integrations_and_idempotency(env):
     assert payload['notes'] == 'cargo=rh; porte=200mais; ig=@ana'
     assert cb(env, 'porte', '200mais').json() == dm.EMPTY
     assert cb(env, 'cargo', 'rh').json() == dm.EMPTY
-    assert send(env, 'obrigada').json() == dm.EMPTY
+    assert send(env, 'obrigada').json()['content']['messages'][0]['text'].startswith('Não entendi')
     assert env[2].call_count == 2
     with main.db() as conn:
         assert conn.execute('SELECT COUNT(*) FROM dm_jobs').fetchone()[0] == 5
@@ -343,7 +344,8 @@ def test_full_contact_restart_and_legacy_precedence(env):
     assert lead()['email'] == 'new@example.org'
     response = full_contact(env, subscriber_id='123', id='other', text='obrigada',
                             email='ignored@example.org')
-    assert response.json() == dm.EMPTY
+    assert response.json()['content']['messages'][0]['text'].startswith('Não entendi')
+    assert lead()['state'] == 'q1'
     assert lead()['email'] == 'new@example.org'
 
 
@@ -395,3 +397,82 @@ def test_dockerfile_copies_all_modules():
     for mod in ['main.py', 'emails_abandono.py', 'email_layout.py', 'dm_mapa.py']:
         assert mod in df
     assert 'COPY static' in df
+
+
+def test_text_full_flow(env, monkeypatch):
+    monkeypatch.setenv('DM_REPLY_FLOW_NS', 'flow-map')
+    response = full_contact(env, email='ana@example.org')
+    for value in ['Não', 'Às vezes', 'Sim, frequente', 'Às vezes', 'Sim, frequente', 'RH', 'Mais de 200', 'Sim']:
+        assert response.status_code == 200
+        assert 'Authorization' not in response.text and 'secret' not in response.text
+        for reply in response.json()['content'].get('quick_replies', []):
+            assert reply == {'type': 'flow', 'caption': reply['caption'], 'target': 'flow-map'}
+            assert len(reply['caption']) <= 20
+        response = full_contact(env, last_input_text=value)
+    assert lead()['state'] == 'delivered'
+    assert lead()['score'] == 6
+    assert lead()['cargo'] == 'rh' and lead()['porte'] == '200mais'
+    assert lead()['contact_accepted'] == 1
+    assert env[2].call_count == 3 and env[4].call_count == 1
+    assert full_contact(env, last_input_text='Sim').json() == dm.EMPTY
+
+
+@pytest.mark.parametrize('text,value', [
+    ('nao', 0), ('n', 0), (' NÃO!!! 👎 ', 0), ('0', 0),
+    ('as vezes', 1), ('ÀS VEZES…', 1), ('talvez', 1), ('1', 1),
+    ('sim', 2), ('s', 2), ('frequente', 2), ('sim frequente', 2),
+    ('SIM, FREQUENTE! 👍', 2), ('2', 2),
+])
+def test_text_question_synonyms(env, text, value):
+    full_contact(env, email='ana@example.org')
+    assert full_contact(env, last_input_text=text).status_code == 200
+    assert lead()['q1'] == value and lead()['state'] == 'q2'
+
+
+@pytest.mark.parametrize('text,accepted', [
+    ('sim', 1), ('quero', 1), ('pode', 1), ('nao', 0), ('AGORA NÃO! 👋', 0),
+])
+def test_text_b2b_synonyms(env, text, accepted):
+    deliver(env)
+    response = full_contact(env, last_input_text=text)
+    assert response.status_code == 200
+    assert lead()['contact_accepted'] == accepted
+    assert 'Não entendi' not in response.text
+
+
+@pytest.mark.parametrize('step', list(dm.CHOICES))
+def test_invalid_text_repeats_choice(env, step):
+    full_contact(env, email='ana@example.org')
+    state = step if step.startswith('q') else ('delivered' if step == 'b2b' else 'awaiting_' + step)
+    with main.db() as conn:
+        conn.execute('UPDATE dm_leads SET state=?, b2b=1', (state,))
+    before = lead()
+    content = full_contact(env, last_input_text='não sei responder').json()['content']
+    assert content['messages'][0]['text'] == 'Não entendi 🙂 Toca numa das opções abaixo:'
+    expected = (f'Pergunta {step[1]} de 5\n\n{dm.QUESTIONS[int(step[1]) - 1]}'
+                if step.startswith('q') else dm.PROMPTS[step])
+    assert content['messages'][1]['text'] == expected
+    assert content['quick_replies'] == dm.replies('123', step, dm.CHOICES[step])
+    assert lead() == before
+    assert not env[2].called and not env[4].called
+
+
+@pytest.mark.parametrize('step,options', [('cargo', dm.CARGOS), ('porte', dm.PORTES)])
+def test_choice_keys_and_captions(step, options):
+    for key, caption in options.items():
+        assert len(caption) <= 20
+        assert dm.match_choice(step, key) == key
+        assert dm.match_choice(step, caption.upper() + '! 🙂') == key
+
+
+def test_text_delivered_without_pending_b2b(env):
+    deliver(env, cargo='outro')
+    assert full_contact(env, last_input_text='sim').json() == dm.EMPTY
+
+
+@pytest.mark.parametrize('username', ['roger.arruda_', 'jaopelizer'])
+def test_excluded_family_text_does_not_advance(env, username):
+    full_contact(env, email='ana@example.org')
+    before = lead()
+    assert full_contact(env, ig_username=username, last_input_text='Sim').json() == dm.EMPTY
+    assert lead() == before
