@@ -56,6 +56,33 @@ def band(score):
     return 'verde' if score <= 3 else 'amarelo' if score <= 6 else 'vermelho'
 
 
+# Ordem de desempate da dor principal: o que mais adoece e mais vende o ebook primeiro.
+PAIN_PRIORITY = ('q4', 'q5', 'q1', 'q2', 'q3')
+PAIN_HOOKS = {
+    'q1': 'hora extra e "tudo é urgente" virando rotina.',
+    'q2': 'gente sem clareza do que se espera dela ou de quem decide.',
+    'q3': 'esforço que só é notado quando algo dá errado.',
+    'q4': 'conflito e "brincadeira" que todo mundo vê e ninguém conversa.',
+    'q5': 'problema que só aparece quando já virou crise.',
+}
+PAIN_FIX = {  # só o que existe no ebook (ver CEBEC/low-ticket-lps/ebook/ebook-texto-extraido.txt)
+    'q1': 'os 4 combinados mínimos de prioridade e papel e uma reunião de alinhamento de 15 minutos',
+    'q2': 'um acordo de uma semana pra deixar claro quem entrega o quê, quem decide e quando vocês revisam',
+    'q3': 'um inventário de contribuições e um jeito de reconhecer que vai além do "parabéns"',
+    'q4': 'os 4 movimentos de uma conversa difícil que não vira briga',
+    'q5': 'a escuta em 5 perguntas pra equipe trazer o problema antes da crise',
+}
+
+
+def top_pain(lead):
+    """Pergunta com a resposta mais alta (2 antes de 1); empate pela PAIN_PRIORITY. None se tudo 0."""
+    for level in (2, 1):
+        for key in PAIN_PRIORITY:
+            if lead.get(key) == level:
+                return key
+    return None
+
+
 def result_text(score):
     descriptions = {
         'verde': '🟢 Atenção pontual\n\nBom ponto de partida. Converse com a equipe sobre o que pontuou antes que vire padrão.',
@@ -375,9 +402,16 @@ def send_job(kind, lead):
         score = lead['score'] or 0
         content = 'lembrete-dm' if kind == 'reminder' else 'oferta-dm-' + band(score)
         url = base_url() + '/dm/r?' + urlencode({'s': lead['subscriber_id'], 'to': 'ebook', 'utm_content': content})
-        text = ("Conseguiu responder as 5 perguntas? Se 3 ou mais deram 'sim', o ebook é o próximo passo mais rápido: R$ 9,90 👇" if kind == 'reminder' else
-                (f'Com {score} de 10, o próximo passo é transformar isso em prática com a equipe. O ebook Liderança de Impacto traz 7 práticas com exercícios pra aplicar já nesta semana. R$ 9,90 👇' if score >= 4 else
-                 'Pra manter a equipe nesse nível, o ebook Liderança de Impacto traz 7 práticas com exercícios pra aplicar no dia a dia. R$ 9,90 👇'))
+        dor = top_pain(dict(lead))
+        if kind == 'reminder':
+            text = "Conseguiu responder as 5 perguntas? Se 3 ou mais deram 'sim', o ebook é o próximo passo mais rápido: R$ 9,90 👇"
+        elif dor and score >= 4:
+            text = (f'Com {score} de 10, o ponto que mais pesou foi: {PAIN_HOOKS[dor]}\n\n'
+                    f'O ebook Liderança de Impacto tem {PAIN_FIX[dor]}, com exercício pra aplicar já nesta semana. R$ 9,90 👇')
+        elif score >= 4:
+            text = f'Com {score} de 10, o próximo passo é transformar isso em prática com a equipe. O ebook Liderança de Impacto traz 7 práticas com exercícios pra aplicar já nesta semana. R$ 9,90 👇'
+        else:
+            text = 'Pra manter a equipe nesse nível, o ebook Liderança de Impacto traz 7 práticas com exercícios pra aplicar no dia a dia. R$ 9,90 👇'
         data = block('', messages=[{'type': 'text', 'text': text, 'buttons': [{'type': 'url', 'caption': 'Quero o ebook', 'url': url}]}])
         if kind == 'quiz_reminder':
             number = int(lead['state'][1])
@@ -487,9 +521,17 @@ def redirect(s: str, to: str = 'ebook', utm_content: str = 'oferta-dm'):
         raise HTTPException(400, 'Destino inválido')
     with core().db() as conn:
         conn.execute('UPDATE dm_leads SET ebook_clicked_at=COALESCE(ebook_clicked_at,?) WHERE subscriber_id=?', (core().now_utc().isoformat(), s))
+        lead = conn.execute('SELECT * FROM dm_leads WHERE subscriber_id=?', (s,)).fetchone()
     url = urlsplit(os.environ.get('EBOOK_URL', 'https://gestaodeimpacto.angelapelizer.com/ebook/'))
     query = dict(parse_qsl(url.query, keep_blank_values=True))
     query.update(utm_source='manychat', utm_medium='dm', utm_campaign='dm-mapa', utm_content=utm_content)
+    if lead:
+        dor = top_pain(dict(lead))
+        if dor:
+            query['dor'] = dor
+            query['utm_term'] = 'dor-' + dor
+        if lead['score'] is not None:
+            query['faixa'] = band(lead['score'])
     return RedirectResponse(urlunsplit(url._replace(query=urlencode(query))), status_code=302)
 
 

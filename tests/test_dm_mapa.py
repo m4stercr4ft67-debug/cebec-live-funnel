@@ -488,3 +488,24 @@ def test_entry_flag_restarts_existing_lead(env):
     again = env[0].post('/dm/mapa?entry=1', headers={'Authorization': 'Bearer secret'}, json=payload)
     assert 'Pergunta 1 de 5' in str(again.json())
     assert lead()['state'] == 'q1' and lead()['q1'] is None
+
+
+def test_top_pain_priority():
+    assert dm.top_pain({'q1': 2, 'q2': 0, 'q3': 2, 'q4': 1, 'q5': 0}) == 'q1'
+    assert dm.top_pain({'q1': 2, 'q4': 2}) == 'q4'
+    assert dm.top_pain({'q1': 1, 'q3': 1, 'q5': 1}) == 'q5'
+    assert dm.top_pain({'q1': 0, 'q2': 0, 'q3': 0, 'q4': 0, 'q5': 0}) is None
+
+
+def test_redirect_carries_pain_and_band(env):
+    full_contact(env, email='a@exemplo.com.br')
+    for answer in ['Não', 'Sim, frequente', 'Não', 'Às vezes', 'Não']:
+        full_contact(env, last_input_text=answer)
+    r = env[0].get('/dm/r?s=123&utm_content=oferta-dm', follow_redirects=False)
+    assert r.status_code == 302
+    loc = r.headers['location']
+    assert 'dor=q2' in loc and 'faixa=verde' in loc and 'utm_term=dor-q2' in loc
+
+
+def test_pain_copy_covers_all_questions():
+    assert set(dm.PAIN_HOOKS) == set(dm.PAIN_FIX) == set(dm.PAIN_PRIORITY) == {f'q{i}' for i in range(1, 6)}
