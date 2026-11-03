@@ -207,7 +207,7 @@ def mapa(body: Incoming, background_tasks: BackgroundTasks, authorization: str |
                 actions = tags('lead-mapa')
                 if os.environ.get('MANYCHAT_EMAIL_MAPA_FIELD_EXISTS') == '1':
                     actions.append(field('email_mapa', email))
-                return question(sid, 1, 'Oi! Aqui é da equipe da Dra. Angela 👋 Vou te mandar 5 perguntas rápidas pra descobrir se sua equipe está adoecendo. Pensa nas últimas semanas, não num dia ruim 👇', actions)
+                return question(sid, 1, 'Anotado! Agora responde rapidinho, pensando nas últimas semanas (não num dia ruim). São 5 perguntas 👇', actions)
             return block('Oi! Aqui é da equipe da Dra. Angela 👋 Te mando agora as 5 perguntas pra descobrir se sua equipe está adoecendo. Qual seu melhor e-mail?\n\nUsamos seu e-mail só para enviar conteúdos do CEBEC. Você pode sair quando quiser.', tags('lead-mapa'))
         if lead['state'] != 'awaiting_email':
             return EMPTY
