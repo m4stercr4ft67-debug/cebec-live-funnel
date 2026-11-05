@@ -39,9 +39,15 @@ def env_ids(name: str, default: str) -> set[str]:
     return {value.strip() for value in os.environ.get(name, default).split(",") if value.strip()}
 
 
+def env_bool(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", "off"}
+
+
+EBOOK_INCLUDES_LIVE = env_bool("EBOOK_INCLUDES_LIVE", "1")
+EBOOK_EMAIL_FROM_BACKEND = env_bool("EBOOK_EMAIL_FROM_BACKEND", "0")
 LIVE_PAYMENT_LINK_IDS = env_ids("LIVE_PAYMENT_LINK_IDS", "5130e417-e54e-4ea6-b665-9011cd1ae9f6,d8e43409-e35c-48f0-8fb7-43b7f72bf30d")
-LIVE_BUMP_IDS = env_ids("LIVE_BUMP_IDS", "c8f0cbfc-14b4-4762-a4be-78507345824b")
-EBOOK_PAYMENT_LINK_IDS = env_ids("EBOOK_PAYMENT_LINK_IDS", "d6000597-5cf2-4cc9-8dc5-db34a1522111")
+LIVE_BUMP_IDS = env_ids("LIVE_BUMP_IDS", "c8f0cbfc-14b4-4762-a4be-78507345824b,d6371547-92c3-4ddb-a74d-ceaad444927a,62794763-a9f3-4267-9de2-f4e977fe6d7e")
+EBOOK_PAYMENT_LINK_IDS = env_ids("EBOOK_PAYMENT_LINK_IDS", "d6000597-5cf2-4cc9-8dc5-db34a1522111,7a05f82a-6217-4e3a-9511-b3b51705423b")
 GI_PAYMENT_LINK_IDS = env_ids("GI_PAYMENT_LINK_IDS", "8748e80f-7cba-41f7-a2a7-65c84a2105b3")
 EBOOK_DOWNLOAD_URL = os.environ.get("EBOOK_DOWNLOAD_URL", "").strip()
 logger = logging.getLogger(__name__)
@@ -256,14 +262,14 @@ def classify_product(payment_link_id: str, bump_ids: list[str]) -> str:
         products.append("ebook")
     if payment_link_id in GI_PAYMENT_LINK_IDS:
         products.append("gi")
-    if payment_link_id in LIVE_PAYMENT_LINK_IDS | BONUS_PAYMENT_LINK_IDS or set(bump_ids) & LIVE_BUMP_IDS:
+    if payment_link_id in LIVE_PAYMENT_LINK_IDS | BONUS_PAYMENT_LINK_IDS or set(bump_ids) & LIVE_BUMP_IDS or (EBOOK_INCLUDES_LIVE and "ebook" in products):
         products.append("live")
     return "+".join(products) or "outro"
 
 
 def send_product_email(nome: str, email: str, produto: str):
-    if produto == "ebook" and not EBOOK_DOWNLOAD_URL:
-        logger.warning("EBOOK_DOWNLOAD_URL ausente: entrega do ebook não enviada")
+    if produto == "ebook" and (not EBOOK_EMAIL_FROM_BACKEND or not EBOOK_DOWNLOAD_URL):
+        logger.info("entrega do ebook feita pela Área de Membros")
         return
     if not RESEND_API_KEY or not email:
         return
@@ -277,8 +283,17 @@ def send_product_email(nome: str, email: str, produto: str):
         logger.error("Falha ao enviar email do produto %s", produto)
 
 
-def render_confirmation_email(nome: str, has_bonus: bool = False, has_bump: bool = False) -> str:
+def render_confirmation_email(nome: str, has_bonus: bool = False, has_bump: bool = False, live_is_ebook_bonus: bool = False) -> str:
     primeiro_nome = html_lib.escape((nome or "").strip().split(" ")[0] or "tudo bem")
+    heading = f"Oi, {primeiro_nome}! Sua vaga está confirmada 🎉"
+    introduction = 'Você garantiu seu acesso à <strong>Live Fechada "Gestão de Impacto na Prática"</strong>, com Angela Pelizer.'
+    date_line = "📅 <strong>Segunda-feira, às 19h00 (horário de Brasília)</strong> — ao vivo, sem gravação. Acesso exclusivo para quem garantiu a vaga."
+    footer = "Guarde este e-mail: o link da live é o mesmo na segunda às 19h."
+    if live_is_ebook_bonus:
+        heading = f"Oi, {primeiro_nome}! Você ganhou a Live Fechada de segunda 🎁"
+        introduction = "Junto com o ebook <strong>Liderança de Impacto</strong>, você ganhou acesso à <strong>Live Fechada de segunda com a Angela Pelizer</strong>: uma aula ao vivo em que ela aprofunda as práticas do ebook e mostra como aplicar com o seu time."
+        date_line = "📅 <strong>Segunda-feira, às 19h (horário de Brasília)</strong>. É ao vivo e não fica gravada, então reserve o horário."
+        footer = "O ebook chega em outro e-mail, com o acesso à Área de Membros CEBEC. " + footer
     redirect_url = "https://live.angelapelizer.com/cebec/entrar-grupo"
     addon_blocks = ""
     if has_bonus and BONUS_AULA_URL:
@@ -302,13 +317,12 @@ def render_confirmation_email(nome: str, has_bonus: bool = False, has_bump: bool
         <span style="color:#F5F4F0; font-size:13px; letter-spacing:0.18em; text-transform:uppercase;">CEBEC · Angela Pelizer</span>
       </div>
       <div style="padding: 32px; background:#F5F4F0;">
-        <h1 style="font-size:22px; margin:0 0 16px;">Oi, {primeiro_nome}! Sua vaga está confirmada 🎉</h1>
+        <h1 style="font-size:22px; margin:0 0 16px;">{heading}</h1>
         <p style="font-size:15px; line-height:1.6;">
-          Você garantiu seu acesso à <strong>Live Fechada "Gestão de Impacto na Prática"</strong>,
-          com Angela Pelizer.
+          {introduction}
         </p>
         <p style="font-size:15px; line-height:1.6;">
-          📅 <strong>Segunda-feira, às 19h00</strong> — acesso exclusivo pra quem garantiu ingresso.
+          {date_line}
         </p>
         <div style="margin: 28px 0;">
           <a href="{redirect_url}"
@@ -326,7 +340,7 @@ def render_confirmation_email(nome: str, has_bonus: bool = False, has_bump: bool
         </div>
         {addon_blocks}
         <p style="font-size:14px; line-height:1.6; color:#333;">
-          Guarde este e-mail: o link da live é o mesmo na segunda às 19h.
+          {footer}
         </p>
         <p style="font-size:13px; color:#888; margin-top:32px;">
           Qualquer dúvida, é só responder este e-mail.
@@ -336,7 +350,7 @@ def render_confirmation_email(nome: str, has_bonus: bool = False, has_bump: bool
     """
 
 
-def send_confirmation_email(nome: str, email: str, has_bonus: bool = False, has_bump: bool = False):
+def send_confirmation_email(nome: str, email: str, has_bonus: bool = False, has_bump: bool = False, live_is_ebook_bonus: bool = False):
     if has_bonus and not BONUS_AULA_URL:
         print("[email] ATENÇÃO: bônus comprado mas URL não configurada")
     if has_bump and not BUMP_KIT_URL:
@@ -345,14 +359,14 @@ def send_confirmation_email(nome: str, email: str, has_bonus: bool = False, has_
         print(f"[email] skip — RESEND_API_KEY ausente ou email vazio (email={email!r})")
         return
 
-    html = render_confirmation_email(nome, has_bonus, has_bump)
+    html = render_confirmation_email(nome, has_bonus, has_bump, live_is_ebook_bonus)
 
     try:
         resend.Emails.send(
             {
                 "from": RESEND_FROM,
                 "to": [email],
-                "subject": "[Confirmado] Sua vaga na Live Fechada de Segunda - links de acesso",
+                "subject": "[Bônus do seu ebook] Sua vaga na Live Fechada de segunda, 19h - links de acesso" if live_is_ebook_bonus else "[Confirmado] Sua vaga na Live Fechada de Segunda - links de acesso",
                 "html": html,
             }
         )
@@ -807,7 +821,12 @@ async def webhook_zpay(request: Request, background_tasks: BackgroundTasks):
 
     has_bonus, has_bump = addon_flags(lead["payment_link_id"], lead["bump_ids"])
     if "live" in produto.split("+"):
-        background_tasks.add_task(send_confirmation_email, lead["nome"], lead["email"], has_bonus, has_bump)
+        live_is_ebook_bonus = (
+            "ebook" in produto.split("+")
+            and not set(lead["bump_ids"]) & LIVE_BUMP_IDS
+            and lead["payment_link_id"] not in LIVE_PAYMENT_LINK_IDS | BONUS_PAYMENT_LINK_IDS
+        )
+        background_tasks.add_task(send_confirmation_email, lead["nome"], lead["email"], has_bonus, has_bump, live_is_ebook_bonus)
         background_tasks.add_task(tag_manychat_buyer, lead["email"], lead["telefone"])
     for product in ("ebook", "gi"):
         if product in produto.split("+"):
