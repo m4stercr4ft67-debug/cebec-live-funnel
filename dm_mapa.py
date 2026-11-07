@@ -225,11 +225,23 @@ def match_choice(step, text):
     aliases = {}
     if step.startswith('q'):
         aliases = {'nao': '0', 'n': '0', 'as vezes': '1', 'talvez': '1',
-                   'sim': '2', 's': '2', 'frequente': '2', 'sim frequente': '2'}
+                   'sim': '2', 's': '2', 'frequente': '2', 'sim frequente': '2',
+                   'depende': '1', 'mais ou menos': '1', normalize_choice('+ ou -'): '1',
+                   'um pouco': '1', 'pouco': '1', 'raramente': '1', 'as vezes sim': '1',
+                   'de vez em quando': '1', 'em parte': '1', 'parcialmente': '1',
+                   'mais ou menos isso': '1', 'nao muito': '1',
+                   'sim muito': '2', 'muito': '2', 'bastante': '2', 'com certeza': '2',
+                   'sempre': '2', 'demais': '2', 'nunca': '0', 'de jeito nenhum': '0'}
     elif step == 'b2b':
         aliases = {'sim': 'sim', 'quero': 'sim', 'pode': 'sim',
                    'nao': 'nao', 'agora nao': 'nao'}
-    return aliases.get(normalized)
+    value = aliases.get(normalized)
+    if value is not None:
+        return value
+    if step in {'q1', 'q2', 'q3', 'q4', 'q5'} and normalized.startswith(
+            ('depende', 'as vezes', 'mais ou menos', 'de vez em quando')):
+        return '1'
+    return None
 
 
 def retry_choice(sid, step):

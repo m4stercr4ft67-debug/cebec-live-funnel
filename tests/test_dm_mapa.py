@@ -429,6 +429,33 @@ def test_text_question_synonyms(env, text, value):
     assert lead()['q1'] == value and lead()['state'] == 'q2'
 
 
+@pytest.mark.parametrize('step', ['q1', 'q2', 'q3', 'q4', 'q5'])
+@pytest.mark.parametrize('text,value', [
+    ('depende', '1'), ('Depende do setor da empresa.', '1'),
+    ('Mais ou menos', '1'), ('+ ou -', '1'), ('um pouco', '1'),
+    ('pouco', '1'), ('raramente', '1'), ('as vezes sim', '1'),
+    ('de vez em quando', '1'), ('em parte', '1'), ('parcialmente', '1'),
+    ('mais ou menos isso', '1'), ('não muito', '1'),
+    ('Às vezes acontece.', '1'), ('Mais ou menos na equipe.', '1'),
+    ('De vez em quando acontece.', '1'), ('sim muito', '2'),
+    ('muito', '2'), ('bastante', '2'), ('com certeza', '2'),
+    ('sempre', '2'), ('demais', '2'), ('nunca', '0'),
+    ('de jeito nenhum', '0'), ('blabla', None),
+])
+def test_question_extended_aliases(step, text, value):
+    assert dm.match_choice(step, text) == value
+
+
+@pytest.mark.parametrize('step', ['cargo', 'porte', 'b2b'])
+@pytest.mark.parametrize('text', [
+    'depende', 'Depende do setor da empresa.', 'Mais ou menos', '+ ou -',
+    'Às vezes acontece.', 'De vez em quando acontece.', 'não muito',
+    'nunca', 'sempre', 'blabla',
+])
+def test_question_aliases_do_not_match_other_steps(step, text):
+    assert dm.match_choice(step, text) is None
+
+
 @pytest.mark.parametrize('text,accepted', [
     ('sim', 1), ('quero', 1), ('pode', 1), ('nao', 0), ('AGORA NÃO! 👋', 0),
 ])
